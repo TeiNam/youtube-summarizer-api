@@ -24,6 +24,19 @@ from app.api.routes import router
 from app.models.responses import ErrorDetail, ErrorResponse
 
 
+class UnicodeJSONResponse(JSONResponse):
+    """한글 등 비ASCII 문자를 이스케이프하지 않는 JSON 응답 클래스"""
+
+    def render(self, content) -> bytes:
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+
 class JsonFormatter(logging.Formatter):
     """구조화된 JSON 로그 포매터"""
 
@@ -66,6 +79,7 @@ app = FastAPI(
     title="YouTube Summary API",
     description="유튜브 영상 URL을 입력받아 자막 추출, 번역, 요약을 수행하는 REST API",
     version="0.1.0",
+    default_response_class=UnicodeJSONResponse,
 )
 
 # ---------------------------------------------------------------------------
@@ -93,7 +107,7 @@ async def timeout_exception_handler(request: Request, exc: Exception) -> JSONRes
             message="AWS 서비스 요청 시간이 초과되었습니다",
         )
     )
-    return JSONResponse(status_code=504, content=error_response.model_dump())
+    return UnicodeJSONResponse(status_code=504, content=error_response.model_dump())
 
 
 @app.exception_handler(Exception)
@@ -116,7 +130,7 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
             message="내부 서버 오류가 발생했습니다",
         )
     )
-    return JSONResponse(status_code=500, content=error_response.model_dump())
+    return UnicodeJSONResponse(status_code=500, content=error_response.model_dump())
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +174,7 @@ async def api_key_auth_middleware(request: Request, call_next):
         error_response = ErrorResponse(
             error=ErrorDetail(code="MISSING_API_KEY", message="API 키가 필요합니다")
         )
-        return JSONResponse(status_code=401, content=error_response.model_dump())
+        return UnicodeJSONResponse(status_code=401, content=error_response.model_dump())
 
     if request_api_key != API_KEY:
         logger.warning("유효하지 않은 API 키: %s %s", request.method, request.url.path)
@@ -169,7 +183,7 @@ async def api_key_auth_middleware(request: Request, call_next):
                 code="INVALID_API_KEY", message="유효하지 않은 API 키입니다"
             )
         )
-        return JSONResponse(status_code=401, content=error_response.model_dump())
+        return UnicodeJSONResponse(status_code=401, content=error_response.model_dump())
 
     return await call_next(request)
 

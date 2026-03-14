@@ -4,6 +4,7 @@ POST /summarize - 유튜브 영상 요약 작업 요청
 GET /tasks/{task_id} - 작업 상태 조회
 """
 
+import json
 import logging
 
 from fastapi import APIRouter, BackgroundTasks
@@ -22,6 +23,20 @@ from app.services.task_manager import TaskManager
 from app.services.url_validator import validate_youtube_url
 
 logger = logging.getLogger(__name__)
+
+
+class UnicodeJSONResponse(JSONResponse):
+    """한글 등 비ASCII 문자를 이스케이프하지 않는 JSON 응답 클래스"""
+
+    def render(self, content) -> bytes:
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
 
 # 모듈 레벨 싱글톤 TaskManager 인스턴스
 task_manager = TaskManager()
@@ -57,7 +72,7 @@ async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks
         error_response = ErrorResponse(
             error=ErrorDetail(code="INVALID_URL", message=str(e))
         )
-        return JSONResponse(status_code=422, content=error_response.model_dump())
+        return UnicodeJSONResponse(status_code=422, content=error_response.model_dump())
 
     # 작업 생성
     task_id = task_manager.create_task(request.url, request.target_language)
@@ -92,7 +107,7 @@ async def get_task(task_id: str):
                 message=f"작업을 찾을 수 없습니다: {task_id}",
             )
         )
-        return JSONResponse(status_code=404, content=error_response.model_dump())
+        return UnicodeJSONResponse(status_code=404, content=error_response.model_dump())
 
     # 오류 정보가 문자열인 경우 ErrorDetail로 변환
     error = None
