@@ -14,6 +14,7 @@ from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.tests.conftest import PREFIX
 
 
 # 테스트 클라이언트
@@ -36,7 +37,7 @@ class TestInternalServerError:
             side_effect=RuntimeError("예상치 못한 오류"),
         ):
             response = client.post(
-                "/summarize",
+                f"{PREFIX}/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
                 headers=AUTH_HEADERS,
             )
@@ -49,7 +50,7 @@ class TestInternalServerError:
             side_effect=RuntimeError("테스트 오류"),
         ):
             response = client.post(
-                "/summarize",
+                f"{PREFIX}/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
                 headers=AUTH_HEADERS,
             )
@@ -68,7 +69,7 @@ class TestInternalServerError:
                 side_effect=RuntimeError("스택 트레이스 테스트"),
             ):
                 client.post(
-                    "/summarize",
+                    f"{PREFIX}/summarize",
                     json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
                     headers=AUTH_HEADERS,
                 )
@@ -91,7 +92,7 @@ class TestTimeoutError:
             side_effect=ReadTimeoutError(endpoint_url="https://bedrock.amazonaws.com"),
         ):
             response = client.post(
-                "/summarize",
+                f"{PREFIX}/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
                 headers=AUTH_HEADERS,
             )
@@ -104,7 +105,7 @@ class TestTimeoutError:
             side_effect=ConnectTimeoutError(endpoint_url="https://transcribe.amazonaws.com"),
         ):
             response = client.post(
-                "/summarize",
+                f"{PREFIX}/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
                 headers=AUTH_HEADERS,
             )
@@ -117,7 +118,7 @@ class TestTimeoutError:
             side_effect=ReadTimeoutError(endpoint_url="https://bedrock.amazonaws.com"),
         ):
             response = client.post(
-                "/summarize",
+                f"{PREFIX}/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
                 headers=AUTH_HEADERS,
             )
@@ -136,7 +137,7 @@ class TestTimeoutError:
                 side_effect=ReadTimeoutError(endpoint_url="https://bedrock.amazonaws.com"),
             ):
                 client.post(
-                    "/summarize",
+                    f"{PREFIX}/summarize",
                     json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
                     headers=AUTH_HEADERS,
                 )
@@ -155,7 +156,7 @@ class TestRequestResponseLogging:
     def test_successful_request_is_logged(self, caplog) -> None:
         """성공적인 요청이 로깅되어야 한다."""
         with caplog.at_level(logging.INFO):
-            client.get("/tasks/some-task-id", headers=AUTH_HEADERS)
+            client.get(f"{PREFIX}/tasks/some-task-id", headers=AUTH_HEADERS)
         # HTTP 메서드와 경로가 로그에 포함되어야 한다
         assert any(
             "GET" in record.message and "/tasks/" in record.message
@@ -165,13 +166,13 @@ class TestRequestResponseLogging:
     def test_log_contains_status_code(self, caplog) -> None:
         """로그에 HTTP 상태 코드가 포함되어야 한다."""
         with caplog.at_level(logging.INFO):
-            client.get("/tasks/nonexistent-id", headers=AUTH_HEADERS)
+            client.get(f"{PREFIX}/tasks/nonexistent-id", headers=AUTH_HEADERS)
         # 404 상태 코드가 로그에 포함되어야 한다
         assert any("404" in record.message for record in caplog.records)
 
     def test_log_contains_process_time(self, caplog) -> None:
         """로그에 처리 시간이 포함되어야 한다."""
         with caplog.at_level(logging.INFO):
-            client.get("/tasks/some-id", headers=AUTH_HEADERS)
+            client.get(f"{PREFIX}/tasks/some-id", headers=AUTH_HEADERS)
         # 처리 시간(ms) 표시가 로그에 포함되어야 한다
         assert any("ms" in record.message for record in caplog.records)

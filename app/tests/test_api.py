@@ -13,6 +13,7 @@ from hypothesis import strategies as st
 from app.api.routes import task_manager
 from app.main import app
 from app.models.responses import ErrorDetail, SummaryResult
+from app.tests.conftest import PREFIX
 
 
 # --- 테스트 클라이언트 ---
@@ -124,7 +125,7 @@ class TestPostSummarize:
     def test_valid_url_returns_202(self) -> None:
         """유효한 유튜브 URL 요청 시 202 응답을 반환해야 한다."""
         response = client.post(
-            "/summarize",
+            f"{PREFIX}/summarize",
             json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
             headers=AUTH_HEADERS,
         )
@@ -136,7 +137,7 @@ class TestPostSummarize:
     def test_invalid_url_returns_422(self) -> None:
         """유효하지 않은 URL 요청 시 422 응답을 반환해야 한다."""
         response = client.post(
-            "/summarize",
+            f"{PREFIX}/summarize",
             json={"url": "https://example.com/not-youtube"},
             headers=AUTH_HEADERS,
         )
@@ -149,7 +150,7 @@ class TestPostSummarize:
     def test_empty_url_returns_422(self) -> None:
         """빈 URL 요청 시 422 응답을 반환해야 한다."""
         response = client.post(
-            "/summarize",
+            f"{PREFIX}/summarize",
             json={"url": ""},
             headers=AUTH_HEADERS,
         )
@@ -173,7 +174,7 @@ class TestGetTask:
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "ko"
         )
 
-        response = client.get(f"/tasks/{task_id}", headers=AUTH_HEADERS)
+        response = client.get(f"{PREFIX}/tasks/{task_id}", headers=AUTH_HEADERS)
         assert response.status_code == 200
         data = response.json()
         assert data["task_id"] == task_id
@@ -181,7 +182,7 @@ class TestGetTask:
 
     def test_nonexistent_task_returns_404(self) -> None:
         """존재하지 않는 작업 ID 조회 시 404 응답을 반환해야 한다."""
-        response = client.get("/tasks/nonexistent-task-id", headers=AUTH_HEADERS)
+        response = client.get(f"{PREFIX}/tasks/nonexistent-task-id", headers=AUTH_HEADERS)
         assert response.status_code == 404
         data = response.json()
         assert "error" in data
@@ -205,7 +206,7 @@ class TestGetTask:
         }
         task_manager.update_status(task_id, TaskStatus.COMPLETED, result=result)
 
-        response = client.get(f"/tasks/{task_id}", headers=AUTH_HEADERS)
+        response = client.get(f"{PREFIX}/tasks/{task_id}", headers=AUTH_HEADERS)
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "completed"
@@ -223,7 +224,7 @@ class TestGetTask:
             task_id, TaskStatus.FAILED, error="파이프라인 처리 실패"
         )
 
-        response = client.get(f"/tasks/{task_id}", headers=AUTH_HEADERS)
+        response = client.get(f"{PREFIX}/tasks/{task_id}", headers=AUTH_HEADERS)
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "failed"
@@ -238,7 +239,7 @@ class TestErrorResponseFormat:
     def test_error_response_has_error_field(self) -> None:
         """오류 응답에는 error 필드가 포함되어야 한다."""
         response = client.post(
-            "/summarize",
+            f"{PREFIX}/summarize",
             json={"url": "invalid-url"},
             headers=AUTH_HEADERS,
         )
@@ -248,7 +249,7 @@ class TestErrorResponseFormat:
 
     def test_error_detail_has_code_and_message(self) -> None:
         """오류 상세에는 code와 message 필드가 포함되어야 한다."""
-        response = client.get("/tasks/does-not-exist", headers=AUTH_HEADERS)
+        response = client.get(f"{PREFIX}/tasks/does-not-exist", headers=AUTH_HEADERS)
         data = response.json()
         assert "code" in data["error"]
         assert "message" in data["error"]

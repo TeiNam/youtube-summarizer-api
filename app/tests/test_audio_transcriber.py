@@ -183,7 +183,8 @@ class TestTranscribeAudioSuccess:
 
     def test_upload_to_s3_success(self) -> None:
         """S3 업로드 성공 시 S3 URI를 반환해야 한다."""
-        with patch("app.services.audio_transcriber.boto3.client") as mock_boto:
+        with patch("app.services.audio_transcriber.boto3.client") as mock_boto, \
+             patch("app.services.audio_transcriber.S3_BUCKET_NAME", "youtube-summary-audio"):
             mock_client = MagicMock()
             mock_boto.return_value = mock_client
 

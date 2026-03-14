@@ -45,9 +45,9 @@ USER appuser
 
 EXPOSE 8000
 
-# 헬스체크
+# 헬스체크 (API_PREFIX 환경변수에 따라 경로 동적 적용)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')" || exit 1
+    CMD python -c "import os,urllib.request; p=os.environ.get('API_PREFIX',''); urllib.request.urlopen(f'http://localhost:8000{p}/health')" || exit 1
 
-# uvicorn 실행 (워커 수는 환경변수로 조절 가능)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# uvicorn 실행 (ROOT_PATH가 설정되면 --root-path 옵션 적용)
+CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 ${ROOT_PATH:+--root-path $ROOT_PATH}"

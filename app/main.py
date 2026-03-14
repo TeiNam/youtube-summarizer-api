@@ -66,7 +66,6 @@ app = FastAPI(
     title="YouTube Summary API",
     description="유튜브 영상 URL을 입력받아 자막 추출, 번역, 요약을 수행하는 REST API",
     version="0.1.0",
-    root_path=ROOT_PATH,
 )
 
 # ---------------------------------------------------------------------------
@@ -128,7 +127,8 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
 API_KEY = os.environ.get("API_KEY")
 
 # 인증이 필요 없는 경로 목록 (API_PREFIX 반영)
-_public_suffixes = ["/docs", "/openapi.json", "/redoc", "/health"]
+# /health만 공개, Swagger UI(/docs, /redoc, /openapi.json)는 인증 필요
+_public_suffixes = ["/health"]
 PUBLIC_PATHS = {f"{API_PREFIX}{p}" for p in _public_suffixes}
 # prefix 없는 원본 경로도 허용 (root_path 사용 시)
 PUBLIC_PATHS.update(_public_suffixes)
