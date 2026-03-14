@@ -1,0 +1,101 @@
+# Generated .gitignore
+# Stacks: Python, FastAPI
+# Date: 2026-03-14
+
+# === Global: OS ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# === Global: IDE & Editors ===
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+.cursor/
+
+# === Global: Security ===
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.secrets
+credentials.json
+service-account*.json
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 가상 환경
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# 배포/빌드
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+
+# 패키지 관리
+pip-log.txt
+pip-delete-this-directory.txt
+.pip/
+
+# 테스트 & 커버리지
+.pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+nosetests.xml
+
+# 타입 체커
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# 기타
+*.log
+local_settings.py
+db.sqlite3
+instance/
+
+# === Project-specific ===
+# 오디오 임시 파일 (yt-dlp 다운로드)
+*.mp3
+*.mp4
+*.wav
+*.webm
+*.m4a
+tmp/

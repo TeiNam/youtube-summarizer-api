@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.hypothesis
+
+# 환경 설정
+.env
+.env.example
+.python-version
+
+# IDE
+.vscode
+.idea
+.kiro
+
+# Docker
+docker/
+
+# 테스트
+app/tests/
+
+# 문서
+*.md

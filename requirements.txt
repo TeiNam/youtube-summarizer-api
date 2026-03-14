@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+youtube-transcript-api
+yt-dlp
+boto3
+hypothesis
+pytest
+httpx
+moto
+pydantic
+python-dotenv
