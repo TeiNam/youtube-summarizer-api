@@ -16,6 +16,8 @@ from app.models.responses import ErrorDetail, SummaryResult
 
 
 # --- 테스트 클라이언트 ---
+# conftest.py에서 설정한 테스트용 API 키를 헤더에 포함
+AUTH_HEADERS = {"X-API-Key": "test-api-key-for-testing"}
 client = TestClient(app)
 
 
@@ -124,6 +126,7 @@ class TestPostSummarize:
         response = client.post(
             "/summarize",
             json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+            headers=AUTH_HEADERS,
         )
         assert response.status_code == 202
         data = response.json()
@@ -135,6 +138,7 @@ class TestPostSummarize:
         response = client.post(
             "/summarize",
             json={"url": "https://example.com/not-youtube"},
+            headers=AUTH_HEADERS,
         )
         assert response.status_code == 422
         data = response.json()
@@ -147,6 +151,7 @@ class TestPostSummarize:
         response = client.post(
             "/summarize",
             json={"url": ""},
+            headers=AUTH_HEADERS,
         )
         assert response.status_code == 422
         data = response.json()
@@ -168,7 +173,7 @@ class TestGetTask:
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "ko"
         )
 
-        response = client.get(f"/tasks/{task_id}")
+        response = client.get(f"/tasks/{task_id}", headers=AUTH_HEADERS)
         assert response.status_code == 200
         data = response.json()
         assert data["task_id"] == task_id
@@ -176,7 +181,7 @@ class TestGetTask:
 
     def test_nonexistent_task_returns_404(self) -> None:
         """존재하지 않는 작업 ID 조회 시 404 응답을 반환해야 한다."""
-        response = client.get("/tasks/nonexistent-task-id")
+        response = client.get("/tasks/nonexistent-task-id", headers=AUTH_HEADERS)
         assert response.status_code == 404
         data = response.json()
         assert "error" in data
@@ -200,7 +205,7 @@ class TestGetTask:
         }
         task_manager.update_status(task_id, TaskStatus.COMPLETED, result=result)
 
-        response = client.get(f"/tasks/{task_id}")
+        response = client.get(f"/tasks/{task_id}", headers=AUTH_HEADERS)
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "completed"
@@ -218,7 +223,7 @@ class TestGetTask:
             task_id, TaskStatus.FAILED, error="파이프라인 처리 실패"
         )
 
-        response = client.get(f"/tasks/{task_id}")
+        response = client.get(f"/tasks/{task_id}", headers=AUTH_HEADERS)
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "failed"
@@ -235,6 +240,7 @@ class TestErrorResponseFormat:
         response = client.post(
             "/summarize",
             json={"url": "invalid-url"},
+            headers=AUTH_HEADERS,
         )
         data = response.json()
         assert "error" in data
@@ -242,7 +248,7 @@ class TestErrorResponseFormat:
 
     def test_error_detail_has_code_and_message(self) -> None:
         """오류 상세에는 code와 message 필드가 포함되어야 한다."""
-        response = client.get("/tasks/does-not-exist")
+        response = client.get("/tasks/does-not-exist", headers=AUTH_HEADERS)
         data = response.json()
         assert "code" in data["error"]
         assert "message" in data["error"]

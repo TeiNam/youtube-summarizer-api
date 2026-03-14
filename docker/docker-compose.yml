@@ -8,9 +8,14 @@ services:
       - "8000:8000"
     env_file:
       - ../.env
+    environment:
+      # 시놀로지 리버스 프록시 경로 설정 시 아래 주석 해제
+      # API_PREFIX: /yts/api
+      # ROOT_PATH: /yts/api
+      TZ: Asia/Seoul
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

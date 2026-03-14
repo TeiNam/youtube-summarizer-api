@@ -56,11 +56,17 @@ setup_logging()
 
 logger = logging.getLogger(__name__)
 
+# 서브 경로 프리픽스 (예: /yts/api)
+API_PREFIX = os.environ.get("API_PREFIX", "")
+# 리버스 프록시 root_path (Swagger UI 등에서 올바른 경로 표시용)
+ROOT_PATH = os.environ.get("ROOT_PATH", "")
+
 # FastAPI 앱 인스턴스 생성
 app = FastAPI(
     title="YouTube Summary API",
     description="유튜브 영상 URL을 입력받아 자막 추출, 번역, 요약을 수행하는 REST API",
     version="0.1.0",
+    root_path=ROOT_PATH,
 )
 
 # ---------------------------------------------------------------------------
@@ -121,8 +127,11 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
 # 환경변수에서 API 키 로드
 API_KEY = os.environ.get("API_KEY")
 
-# 인증이 필요 없는 경로 목록
-PUBLIC_PATHS = {"/docs", "/openapi.json", "/redoc", "/health"}
+# 인증이 필요 없는 경로 목록 (API_PREFIX 반영)
+_public_suffixes = ["/docs", "/openapi.json", "/redoc", "/health"]
+PUBLIC_PATHS = {f"{API_PREFIX}{p}" for p in _public_suffixes}
+# prefix 없는 원본 경로도 허용 (root_path 사용 시)
+PUBLIC_PATHS.update(_public_suffixes)
 
 if not API_KEY:
     logger.warning("API_KEY 환경변수가 설정되지 않았습니다. 인증이 비활성화됩니다.")
@@ -203,7 +212,11 @@ async def request_response_logging_middleware(request: Request, call_next):
     return response
 
 
-# API 라우터 등록
-app.include_router(router)
+# API 라우터 등록 (프리픽스 적용)
+app.include_router(router, prefix=API_PREFIX)
 
-logger.info("YouTube Summary API 앱이 초기화되었습니다")
+logger.info(
+    "YouTube Summary API 앱이 초기화되었습니다 (prefix=%s, root_path=%s)",
+    API_PREFIX or "(없음)",
+    ROOT_PATH or "(없음)",
+)

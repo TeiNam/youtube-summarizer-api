@@ -17,6 +17,7 @@ from app.main import app
 
 
 # 테스트 클라이언트
+AUTH_HEADERS = {"X-API-Key": "test-api-key-for-testing"}
 client = TestClient(app, raise_server_exceptions=False)
 
 
@@ -37,6 +38,7 @@ class TestInternalServerError:
             response = client.post(
                 "/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                headers=AUTH_HEADERS,
             )
         assert response.status_code == 500
 
@@ -49,6 +51,7 @@ class TestInternalServerError:
             response = client.post(
                 "/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                headers=AUTH_HEADERS,
             )
         data = response.json()
         # ErrorResponse 형식 검증: error.code, error.message 필드 존재
@@ -67,6 +70,7 @@ class TestInternalServerError:
                 client.post(
                     "/summarize",
                     json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                    headers=AUTH_HEADERS,
                 )
         # 오류 로그에 예외 메시지가 포함되어야 한다
         assert any("스택 트레이스 테스트" in record.message for record in caplog.records)
@@ -89,6 +93,7 @@ class TestTimeoutError:
             response = client.post(
                 "/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                headers=AUTH_HEADERS,
             )
         assert response.status_code == 504
 
@@ -101,6 +106,7 @@ class TestTimeoutError:
             response = client.post(
                 "/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                headers=AUTH_HEADERS,
             )
         assert response.status_code == 504
 
@@ -113,6 +119,7 @@ class TestTimeoutError:
             response = client.post(
                 "/summarize",
                 json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                headers=AUTH_HEADERS,
             )
         data = response.json()
         # ErrorResponse 형식 검증
@@ -131,6 +138,7 @@ class TestTimeoutError:
                 client.post(
                     "/summarize",
                     json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                    headers=AUTH_HEADERS,
                 )
         # 타임아웃 관련 로그가 기록되어야 한다
         assert any("타임아웃" in record.message for record in caplog.records)
@@ -147,7 +155,7 @@ class TestRequestResponseLogging:
     def test_successful_request_is_logged(self, caplog) -> None:
         """성공적인 요청이 로깅되어야 한다."""
         with caplog.at_level(logging.INFO):
-            client.get("/tasks/some-task-id")
+            client.get("/tasks/some-task-id", headers=AUTH_HEADERS)
         # HTTP 메서드와 경로가 로그에 포함되어야 한다
         assert any(
             "GET" in record.message and "/tasks/" in record.message
@@ -157,13 +165,13 @@ class TestRequestResponseLogging:
     def test_log_contains_status_code(self, caplog) -> None:
         """로그에 HTTP 상태 코드가 포함되어야 한다."""
         with caplog.at_level(logging.INFO):
-            client.get("/tasks/nonexistent-id")
+            client.get("/tasks/nonexistent-id", headers=AUTH_HEADERS)
         # 404 상태 코드가 로그에 포함되어야 한다
         assert any("404" in record.message for record in caplog.records)
 
     def test_log_contains_process_time(self, caplog) -> None:
         """로그에 처리 시간이 포함되어야 한다."""
         with caplog.at_level(logging.INFO):
-            client.get("/tasks/some-id")
+            client.get("/tasks/some-id", headers=AUTH_HEADERS)
         # 처리 시간(ms) 표시가 로그에 포함되어야 한다
         assert any("ms" in record.message for record in caplog.records)

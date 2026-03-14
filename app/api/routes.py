@@ -29,6 +29,12 @@ task_manager = TaskManager()
 router = APIRouter()
 
 
+@router.get("/health")
+async def health_check():
+    """헬스체크 엔드포인트 - 서비스 상태 확인용"""
+    return {"status": "ok"}
+
+
 @router.post("/summarize", status_code=202, response_model=TaskResponse)
 async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks):
     """유튜브 영상 요약 작업을 요청한다.
