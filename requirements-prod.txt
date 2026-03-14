@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+youtube-transcript-api
+yt-dlp
+boto3
+pydantic
+python-dotenv
+httpx
