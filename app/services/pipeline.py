@@ -9,7 +9,7 @@ import logging
 
 from app.models.responses import TaskStatus
 from app.services.audio_transcriber import transcribe_audio
-from app.services.subtitle_extractor import extract_subtitles
+from app.services.subtitle_extractor import extract_subtitles, fetch_video_title
 from app.services.summary_engine import summarize_text, translate_text
 from app.services.task_manager import TaskManager
 
@@ -39,10 +39,11 @@ async def process_summary(
     extraction_method = "subtitle"
 
     try:
-        # 1단계: 텍스트 추출 (자막 또는 음성 인식)
+        # 1단계: 텍스트 추출 (자막 또는 음성 인식) + 영상 제목 가져오기
         task_manager.update_status(task_id, TaskStatus.EXTRACTING)
         logger.info("작업 %s: 자막 추출 시작 (비디오: %s)", task_id, video_id)
 
+        video_title = await fetch_video_title(video_id)
         text = await extract_subtitles(video_id)
 
         if text is None:
@@ -65,7 +66,7 @@ async def process_summary(
 
         # 4단계: 완료 - 결과 저장
         result = {
-            "video_title": video_id,
+            "video_title": video_title,
             "original_language": "auto",
             "extraction_method": extraction_method,
             "translated_text": translated_text,
