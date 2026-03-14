@@ -6,7 +6,8 @@
 from dotenv import load_dotenv
 
 # .env 파일에서 환경변수 로드 (다른 모듈보다 먼저 실행)
-load_dotenv()
+# override=False: Docker 환경변수 등 이미 설정된 값을 .env가 덮어쓰지 않는다
+load_dotenv(override=False)
 
 import logging
 import json
