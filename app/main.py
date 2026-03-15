@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes import router
@@ -80,6 +81,17 @@ app = FastAPI(
     description="유튜브 영상 URL을 입력받아 자막 추출, 번역, 요약을 수행하는 REST API",
     version="0.1.0",
     default_response_class=UnicodeJSONResponse,
+)
+
+# ---------------------------------------------------------------------------
+# CORS 미들웨어 (Obsidian 플러그인 등 cross-origin 요청 허용)
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ---------------------------------------------------------------------------
