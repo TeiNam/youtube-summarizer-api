@@ -3,14 +3,19 @@
 yt-dlp로 유튜브 영상의 오디오를 다운로드하고,
 AWS S3에 업로드한 뒤 AWS Transcribe를 사용하여 텍스트로 변환한다.
 자막이 없는 영상에 대한 폴백 처리를 담당한다.
+
+동기 I/O 호출(yt-dlp, boto3)은 run_in_executor로 스레드풀에서 실행하여
+이벤트 루프 블로킹을 방지한다.
 """
 
+import asyncio
 import json
 import logging
 import os
 import tempfile
 import time
 import uuid
+from functools import partial
 
 import boto3
 import yt_dlp
@@ -199,24 +204,16 @@ def _fetch_transcript_text(transcript_uri: str) -> str:
         raise RuntimeError(f"Transcribe 결과 파싱 실패: {e}") from e
 
 
-async def transcribe_audio(video_id: str) -> str:
-    """유튜브 영상의 오디오를 다운로드하고 음성 인식으로 텍스트를 추출한다.
+def _transcribe_audio_sync(video_id: str) -> str:
+    """유튜브 영상의 오디오를 다운로드하고 음성 인식으로 텍스트를 추출한다 (동기 버전).
 
-    전체 흐름:
-    1. yt-dlp로 오디오 파일 다운로드
-    2. S3에 오디오 업로드
-    3. AWS Transcribe 작업 시작
-    4. 작업 완료 대기 및 결과 텍스트 반환
-    5. 임시 파일 정리
+    스레드풀에서 실행되며, 전체 흐름을 동기적으로 처리한다.
 
     Args:
         video_id: 유튜브 비디오 ID
 
     Returns:
         변환된 텍스트
-
-    Raises:
-        RuntimeError: 오디오 다운로드, S3 업로드, Transcribe 처리 실패 시
     """
     # 고유한 작업 이름 생성
     job_name = f"yt-{video_id}-{uuid.uuid4().hex[:8]}"
@@ -245,17 +242,6 @@ async def transcribe_audio(video_id: str) -> str:
         logger.info("비디오 %s: 음성 인식 완료", video_id)
         return text
 
-    except RuntimeError:
-        # 이미 적절한 메시지가 포함된 RuntimeError는 그대로 전파
-        raise
-    except Exception as e:
-        logger.error(
-            "비디오 %s: 음성 인식 중 예상치 못한 오류 - %s",
-            video_id,
-            e,
-            exc_info=True,
-        )
-        raise RuntimeError(f"음성 인식 실패: {e}") from e
     finally:
         # 5. 임시 파일 정리
         if audio_file and os.path.exists(audio_file):
@@ -270,3 +256,34 @@ async def transcribe_audio(video_id: str) -> str:
                 logger.debug("임시 디렉토리 삭제: %s", temp_dir)
             except OSError:
                 logger.warning("임시 디렉토리 삭제 실패: %s", temp_dir)
+
+
+async def transcribe_audio(video_id: str) -> str:
+    """유튜브 영상의 오디오를 다운로드하고 음성 인식으로 텍스트를 추출한다.
+
+    동기 I/O를 스레드풀에서 실행하여 이벤트 루프를 블로킹하지 않는다.
+
+    Args:
+        video_id: 유튜브 비디오 ID
+
+    Returns:
+        변환된 텍스트
+
+    Raises:
+        RuntimeError: 오디오 다운로드, S3 업로드, Transcribe 처리 실패 시
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, partial(_transcribe_audio_sync, video_id)
+        )
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logger.error(
+            "비디오 %s: 음성 인식 중 예상치 못한 오류 - %s",
+            video_id,
+            e,
+            exc_info=True,
+        )
+        raise RuntimeError(f"음성 인식 실패: {e}") from e

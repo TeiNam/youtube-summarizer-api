@@ -3,11 +3,16 @@
 AWS Bedrock LLM(Claude 모델)을 활용하여 텍스트 번역과 요약을 수행한다.
 번역: 원본 텍스트를 대상 언어로 변환
 요약: 전체 요약문과 핵심 포인트 목록 생성
+
+동기 I/O 호출(boto3)은 run_in_executor로 스레드풀에서 실행하여
+이벤트 루프 블로킹을 방지한다.
 """
 
+import asyncio
 import json
 import logging
 import os
+from functools import partial
 
 from app.services.aws_client import get_aws_client
 
@@ -24,10 +29,30 @@ def _get_bedrock_client():
     return get_aws_client("bedrock-runtime")
 
 
+def _invoke_bedrock_sync(body: str) -> dict:
+    """Bedrock 모델을 동기적으로 호출한다 (스레드풀에서 실행용).
+
+    Args:
+        body: JSON 직렬화된 요청 본문
+
+    Returns:
+        Bedrock 응답 본문 딕셔너리
+    """
+    client = _get_bedrock_client()
+    response = client.invoke_model(
+        modelId=BEDROCK_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=body,
+    )
+    return json.loads(response["body"].read())
+
+
 async def translate_text(text: str, target_language: str = "ko") -> str:
     """텍스트를 대상 언어로 번역한다.
 
     AWS Bedrock의 Claude 모델을 사용하여 번역을 수행한다.
+    동기 I/O를 스레드풀에서 실행하여 이벤트 루프를 블로킹하지 않는다.
 
     Args:
         text: 번역할 원본 텍스트
@@ -54,15 +79,10 @@ async def translate_text(text: str, target_language: str = "ko") -> str:
     )
 
     try:
-        client = _get_bedrock_client()
-        response = client.invoke_model(
-            modelId=BEDROCK_MODEL_ID,
-            contentType="application/json",
-            accept="application/json",
-            body=body,
+        loop = asyncio.get_running_loop()
+        response_body = await loop.run_in_executor(
+            None, partial(_invoke_bedrock_sync, body)
         )
-
-        response_body = json.loads(response["body"].read())
         translated = response_body["content"][0]["text"]
         logger.info("번역 완료 (대상 언어: %s)", target_language)
         return translated
@@ -159,15 +179,10 @@ async def summarize_text(text: str) -> dict:
     )
 
     try:
-        client = _get_bedrock_client()
-        response = client.invoke_model(
-            modelId=BEDROCK_MODEL_ID,
-            contentType="application/json",
-            accept="application/json",
-            body=body,
+        loop = asyncio.get_running_loop()
+        response_body = await loop.run_in_executor(
+            None, partial(_invoke_bedrock_sync, body)
         )
-
-        response_body = json.loads(response["body"].read())
         result_text = response_body["content"][0]["text"]
 
         # JSON 블록 추출 (```json ... ``` 형식 처리)

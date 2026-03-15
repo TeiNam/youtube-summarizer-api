@@ -2,9 +2,14 @@
 
 youtube-transcript-api 라이브러리를 활용하여 유튜브 영상의 자막을 추출한다.
 원본 언어 자막을 우선적으로 선택하며, 자막이 없거나 추출에 실패하면 None을 반환한다.
+
+동기 I/O 호출(yt-dlp, youtube-transcript-api)은 run_in_executor로
+스레드풀에서 실행하여 이벤트 루프 블로킹을 방지한다.
 """
 
+import asyncio
 import logging
+from functools import partial
 from typing import Optional
 
 import yt_dlp
@@ -17,10 +22,26 @@ from youtube_transcript_api._errors import (
 logger = logging.getLogger(__name__)
 
 
+def _fetch_video_title_sync(video_id: str) -> str:
+    """유튜브 영상 제목을 동기적으로 가져온다 (스레드풀에서 실행용)."""
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+    }
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        title = info.get("title", video_id)
+        logger.info("비디오 %s: 제목 추출 성공 - %s", video_id, title)
+        return title
+
+
 async def fetch_video_title(video_id: str) -> str:
     """유튜브 영상 제목을 가져온다.
 
     yt-dlp를 사용하여 영상 메타데이터에서 제목을 추출한다.
+    동기 I/O를 스레드풀에서 실행하여 이벤트 루프를 블로킹하지 않는다.
     실패 시 비디오 ID를 그대로 반환한다.
 
     Args:
@@ -30,17 +51,10 @@ async def fetch_video_title(video_id: str) -> str:
         영상 제목. 실패 시 비디오 ID.
     """
     try:
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-        }
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            title = info.get("title", video_id)
-            logger.info("비디오 %s: 제목 추출 성공 - %s", video_id, title)
-            return title
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, partial(_fetch_video_title_sync, video_id)
+        )
     except Exception as e:
         logger.warning("비디오 %s: 제목 추출 실패 - %s", video_id, e)
         return video_id
@@ -73,11 +87,52 @@ def select_preferred_language(
     return available_languages[0]
 
 
+def _extract_subtitles_sync(video_id: str) -> Optional[str]:
+    """유튜브 영상에서 자막 텍스트를 동기적으로 추출한다 (스레드풀에서 실행용)."""
+    api = YouTubeTranscriptApi()
+    transcript_list = api.list(video_id)
+
+    # 사용 가능한 자막의 언어 코드 수집 및 원본 언어 파악
+    available_languages: list[str] = []
+    original_language: Optional[str] = None
+
+    for transcript in transcript_list:
+        available_languages.append(transcript.language_code)
+        # 자동 생성이 아닌 수동 자막이 있으면 원본 언어로 간주
+        if not transcript.is_generated:
+            original_language = transcript.language_code
+
+    # 자동 생성 자막만 있는 경우 첫 번째 언어를 원본으로 간주
+    if original_language is None and available_languages:
+        original_language = available_languages[0]
+
+    # 우선 언어 선택
+    selected_language = select_preferred_language(
+        available_languages, original_language
+    )
+
+    if selected_language is None:
+        logger.warning("비디오 %s: 사용 가능한 자막이 없습니다", video_id)
+        return None
+
+    # 선택된 언어로 자막 가져오기
+    fetched = api.fetch(video_id, languages=[selected_language])
+
+    # 자막 스니펫을 하나의 텍스트로 결합
+    text_parts = [snippet.text for snippet in fetched]
+    full_text = " ".join(text_parts)
+
+    logger.info(
+        "비디오 %s: 자막 추출 성공 (언어: %s)", video_id, selected_language
+    )
+    return full_text
+
+
 async def extract_subtitles(video_id: str) -> Optional[str]:
     """유튜브 영상에서 자막 텍스트를 추출한다.
 
     youtube-transcript-api를 사용하여 자막 데이터를 가져온다.
-    여러 언어의 자막이 존재하면 원본 언어를 우선적으로 선택한다.
+    동기 I/O를 스레드풀에서 실행하여 이벤트 루프를 블로킹하지 않는다.
     자막이 없거나 추출에 실패하면 None을 반환하여 음성 인식기로 폴백한다.
 
     Args:
@@ -87,44 +142,10 @@ async def extract_subtitles(video_id: str) -> Optional[str]:
         추출된 자막 텍스트. 자막이 없거나 오류 발생 시 None.
     """
     try:
-        api = YouTubeTranscriptApi()
-        transcript_list = api.list(video_id)
-
-        # 사용 가능한 자막의 언어 코드 수집 및 원본 언어 파악
-        available_languages: list[str] = []
-        original_language: Optional[str] = None
-
-        for transcript in transcript_list:
-            available_languages.append(transcript.language_code)
-            # 자동 생성이 아닌 수동 자막이 있으면 원본 언어로 간주
-            if not transcript.is_generated:
-                original_language = transcript.language_code
-
-        # 자동 생성 자막만 있는 경우 첫 번째 언어를 원본으로 간주
-        if original_language is None and available_languages:
-            original_language = available_languages[0]
-
-        # 우선 언어 선택
-        selected_language = select_preferred_language(
-            available_languages, original_language
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, partial(_extract_subtitles_sync, video_id)
         )
-
-        if selected_language is None:
-            logger.warning("비디오 %s: 사용 가능한 자막이 없습니다", video_id)
-            return None
-
-        # 선택된 언어로 자막 가져오기
-        fetched = api.fetch(video_id, languages=[selected_language])
-
-        # 자막 스니펫을 하나의 텍스트로 결합
-        text_parts = [snippet.text for snippet in fetched]
-        full_text = " ".join(text_parts)
-
-        logger.info(
-            "비디오 %s: 자막 추출 성공 (언어: %s)", video_id, selected_language
-        )
-        return full_text
-
     except (TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
         # 자막이 비활성화되었거나 가져올 수 없는 경우
         logger.warning("비디오 %s: 자막을 가져올 수 없습니다 - %s", video_id, e)
