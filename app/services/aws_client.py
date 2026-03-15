@@ -8,11 +8,19 @@ boto3 클라이언트를 생성한다. 모든 AWS 서비스 호출에서 이 모
 import os
 
 import boto3
+from botocore.config import Config
 
 # AWS 자격 증명 (환경변수에서 로드)
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+
+# Bedrock은 긴 텍스트 처리 시 응답이 느릴 수 있으므로 타임아웃을 넉넉히 설정
+_BEDROCK_CONFIG = Config(
+    read_timeout=300,      # 읽기 타임아웃 5분
+    connect_timeout=10,    # 연결 타임아웃 10초
+    retries={"max_attempts": 2},
+)
 
 
 def get_aws_client(service_name: str):
@@ -20,6 +28,7 @@ def get_aws_client(service_name: str):
 
     환경변수에 access key/secret key가 설정되어 있으면
     명시적으로 자격 증명을 전달하고, 없으면 boto3 기본 체인을 사용한다.
+    bedrock-runtime 서비스는 별도 타임아웃 설정을 적용한다.
 
     Args:
         service_name: AWS 서비스 이름 (예: "bedrock-runtime", "s3", "transcribe")
@@ -32,5 +41,9 @@ def get_aws_client(service_name: str):
     if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
         kwargs["aws_access_key_id"] = AWS_ACCESS_KEY_ID
         kwargs["aws_secret_access_key"] = AWS_SECRET_ACCESS_KEY
+
+    # Bedrock 서비스에는 긴 타임아웃 설정 적용
+    if service_name == "bedrock-runtime":
+        kwargs["config"] = _BEDROCK_CONFIG
 
     return boto3.client(service_name, **kwargs)

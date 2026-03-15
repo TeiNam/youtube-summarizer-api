@@ -38,6 +38,7 @@ def _invoke_bedrock_sync(body: str) -> dict:
     Returns:
         Bedrock 응답 본문 딕셔너리
     """
+    logger.info("Bedrock 호출 시작 (모델: %s)", BEDROCK_MODEL_ID)
     client = _get_bedrock_client()
     response = client.invoke_model(
         modelId=BEDROCK_MODEL_ID,
@@ -45,7 +46,9 @@ def _invoke_bedrock_sync(body: str) -> dict:
         accept="application/json",
         body=body,
     )
-    return json.loads(response["body"].read())
+    result = json.loads(response["body"].read())
+    logger.info("Bedrock 호출 완료")
+    return result
 
 
 async def translate_text(text: str, target_language: str = "ko") -> str:
