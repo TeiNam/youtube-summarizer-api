@@ -53,7 +53,7 @@ async def process_summary(
         task_manager.update_status(task_id, TaskStatus.EXTRACTING)
         logger.info("작업 %s: 자막 추출 시작 (비디오: %s)", task_id, video_id)
 
-        video_title, duration = await fetch_video_metadata(video_id)
+        video_title, duration, upload_date = await fetch_video_metadata(video_id)
         text = await extract_subtitles(video_id)
 
         # 자막이 없거나 불완전하면(영상 길이 대비 너무 짧으면) 음성 인식으로 폴백
@@ -89,6 +89,7 @@ async def process_summary(
         # 4단계: 완료 - 결과 저장
         result = {
             "video_title": video_title,
+            "upload_date": upload_date,
             "original_language": "auto",
             "extraction_method": extraction_method,
             "translated_text": translated_text,

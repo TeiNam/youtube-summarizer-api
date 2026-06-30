@@ -27,6 +27,7 @@ class SummaryResult(BaseModel):
 
     Attributes:
         video_title: 영상 제목
+        upload_date: 영상 업로드 날짜 (YYYY-MM-DD). 알 수 없으면 None.
         original_language: 원본 언어 코드
         extraction_method: 텍스트 추출 방식 ("subtitle" 또는 "transcribe")
         translated_text: 번역된 전체 텍스트
@@ -35,6 +36,7 @@ class SummaryResult(BaseModel):
     """
 
     video_title: str
+    upload_date: Optional[str] = None
     original_language: str
     extraction_method: str
     translated_text: str

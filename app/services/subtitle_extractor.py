@@ -29,8 +29,17 @@ MIN_SUBTITLE_CHARS = 100
 MIN_CHARS_PER_MINUTE = 100
 
 
-def _fetch_video_metadata_sync(video_id: str) -> tuple[str, Optional[int]]:
-    """유튜브 영상의 제목·길이(초)를 동기적으로 가져온다 (스레드풀에서 실행용)."""
+def _normalize_upload_date(raw: Optional[str]) -> Optional[str]:
+    """yt-dlp의 upload_date(YYYYMMDD)를 ISO 날짜(YYYY-MM-DD)로 변환한다."""
+    if not raw or len(raw) != 8 or not raw.isdigit():
+        return None
+    return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+
+
+def _fetch_video_metadata_sync(
+    video_id: str,
+) -> tuple[str, Optional[int], Optional[str]]:
+    """유튜브 영상의 제목·길이(초)·업로드 날짜를 동기적으로 가져온다 (스레드풀 실행용)."""
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -41,22 +50,25 @@ def _fetch_video_metadata_sync(video_id: str) -> tuple[str, Optional[int]]:
         info = ydl.extract_info(url, download=False)
         title = info.get("title", video_id)
         duration = info.get("duration")  # 초 단위, 없으면 None
+        upload_date = _normalize_upload_date(info.get("upload_date"))
         logger.info("비디오 %s: 메타데이터 추출 성공 - %s", video_id, title)
-        return title, duration
+        return title, duration, upload_date
 
 
-async def fetch_video_metadata(video_id: str) -> tuple[str, Optional[int]]:
-    """유튜브 영상의 제목과 길이(초)를 가져온다.
+async def fetch_video_metadata(
+    video_id: str,
+) -> tuple[str, Optional[int], Optional[str]]:
+    """유튜브 영상의 제목·길이(초)·업로드 날짜를 가져온다.
 
-    yt-dlp를 사용하여 영상 메타데이터에서 제목과 duration을 추출한다.
+    yt-dlp를 사용하여 영상 메타데이터에서 제목·duration·upload_date를 추출한다.
     동기 I/O를 스레드풀에서 실행하여 이벤트 루프를 블로킹하지 않는다.
-    실패 시 (비디오 ID, None)을 반환한다.
+    실패 시 (비디오 ID, None, None)을 반환한다.
 
     Args:
         video_id: 유튜브 비디오 ID
 
     Returns:
-        (영상 제목, 길이 초). 실패 시 (비디오 ID, None).
+        (영상 제목, 길이 초, 업로드 날짜 YYYY-MM-DD). 실패 시 (비디오 ID, None, None).
     """
     try:
         loop = asyncio.get_running_loop()
@@ -65,7 +77,7 @@ async def fetch_video_metadata(video_id: str) -> tuple[str, Optional[int]]:
         )
     except Exception as e:
         logger.warning("비디오 %s: 메타데이터 추출 실패 - %s", video_id, e)
-        return video_id, None
+        return video_id, None, None
 
 
 def is_subtitle_sufficient(text: Optional[str], duration: Optional[int]) -> bool:

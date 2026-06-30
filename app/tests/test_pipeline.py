@@ -60,7 +60,7 @@ class TestPipelineSubtitleSuccess:
         task_id = _create_task(task_manager)
 
         # 모킹 설정
-        mock_metadata.return_value = ("Test Title", 60)
+        mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
         mock_extract.return_value = SUFFICIENT_SUBTITLE
         mock_translate.return_value = "이것은 자막 텍스트입니다."
         mock_summarize.return_value = {
@@ -113,7 +113,7 @@ class TestPipelineTranscribeFallback:
         task_id = _create_task(task_manager)
 
         # 자막 추출 실패 (None 반환), 음성 인식 성공
-        mock_metadata.return_value = ("Test Title", 60)
+        mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
         mock_extract.return_value = None
         mock_transcribe.return_value = "Transcribed audio text."
         mock_translate.return_value = "음성 인식된 텍스트입니다."
@@ -160,7 +160,7 @@ class TestPipelineExtractionFailure:
 
         task_id = _create_task(task_manager)
 
-        mock_metadata.return_value = ("Test Title", 60)
+        mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
         mock_extract.return_value = None
         mock_transcribe.side_effect = RuntimeError("오디오 다운로드 실패")
 
@@ -196,7 +196,7 @@ class TestPipelineTranslationFailure:
         """번역 실패 시 상태가 failed여야 한다."""
         task_id = _create_task(task_manager)
 
-        mock_metadata.return_value = ("Test Title", 60)
+        mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
         mock_extract.return_value = SUFFICIENT_SUBTITLE
         mock_translate.side_effect = RuntimeError("번역 실패: Bedrock 서비스 오류")
 
@@ -232,7 +232,7 @@ class TestPipelineSummarizationFailure:
         """요약 실패 시 상태가 failed여야 한다."""
         task_id = _create_task(task_manager)
 
-        mock_metadata.return_value = ("Test Title", 60)
+        mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
         mock_extract.return_value = SUFFICIENT_SUBTITLE
         mock_translate.return_value = "번역된 텍스트."
         mock_summarize.side_effect = RuntimeError("요약 실패: Bedrock 서비스 오류")
