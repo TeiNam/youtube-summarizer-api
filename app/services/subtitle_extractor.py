@@ -22,8 +22,15 @@ from youtube_transcript_api._errors import (
 logger = logging.getLogger(__name__)
 
 
-def _fetch_video_title_sync(video_id: str) -> str:
-    """유튜브 영상 제목을 동기적으로 가져온다 (스레드풀에서 실행용)."""
+# 자막 충분성 판정 기준
+# 자동 자막이 깨지면 단어 몇 개만 잡히므로, 절대 하한과 분당 글자수로 거른다.
+# 말하는 영상은 보통 분당 700~1000자라 100자/분은 넉넉한 하한이다.
+MIN_SUBTITLE_CHARS = 100
+MIN_CHARS_PER_MINUTE = 100
+
+
+def _fetch_video_metadata_sync(video_id: str) -> tuple[str, Optional[int]]:
+    """유튜브 영상의 제목·길이(초)를 동기적으로 가져온다 (스레드풀에서 실행용)."""
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -33,31 +40,61 @@ def _fetch_video_title_sync(video_id: str) -> str:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         title = info.get("title", video_id)
-        logger.info("비디오 %s: 제목 추출 성공 - %s", video_id, title)
-        return title
+        duration = info.get("duration")  # 초 단위, 없으면 None
+        logger.info("비디오 %s: 메타데이터 추출 성공 - %s", video_id, title)
+        return title, duration
 
 
-async def fetch_video_title(video_id: str) -> str:
-    """유튜브 영상 제목을 가져온다.
+async def fetch_video_metadata(video_id: str) -> tuple[str, Optional[int]]:
+    """유튜브 영상의 제목과 길이(초)를 가져온다.
 
-    yt-dlp를 사용하여 영상 메타데이터에서 제목을 추출한다.
+    yt-dlp를 사용하여 영상 메타데이터에서 제목과 duration을 추출한다.
     동기 I/O를 스레드풀에서 실행하여 이벤트 루프를 블로킹하지 않는다.
-    실패 시 비디오 ID를 그대로 반환한다.
+    실패 시 (비디오 ID, None)을 반환한다.
 
     Args:
         video_id: 유튜브 비디오 ID
 
     Returns:
-        영상 제목. 실패 시 비디오 ID.
+        (영상 제목, 길이 초). 실패 시 (비디오 ID, None).
     """
     try:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, partial(_fetch_video_title_sync, video_id)
+            None, partial(_fetch_video_metadata_sync, video_id)
         )
     except Exception as e:
-        logger.warning("비디오 %s: 제목 추출 실패 - %s", video_id, e)
-        return video_id
+        logger.warning("비디오 %s: 메타데이터 추출 실패 - %s", video_id, e)
+        return video_id, None
+
+
+def is_subtitle_sufficient(text: Optional[str], duration: Optional[int]) -> bool:
+    """추출된 자막이 요약에 쓸 만큼 충분한지 판정한다.
+
+    자동 자막이 깨지면 단어 몇 개만 잡히는데, 이를 '성공'으로 보면
+    빈약한 요약이 나오므로 음성 인식 폴백으로 넘기기 위한 게이트다.
+
+    Args:
+        text: 추출된 자막 텍스트 (None이면 불충분)
+        duration: 영상 길이(초). None이면 절대 하한만 적용.
+
+    Returns:
+        충분하면 True, 폴백이 필요하면 False.
+    """
+    if not text:
+        return False
+
+    char_count = len(text.strip())
+    if char_count < MIN_SUBTITLE_CHARS:
+        return False
+
+    # 영상 길이를 알면 분당 글자수로 추가 검증
+    if duration and duration > 0:
+        chars_per_minute = char_count / (duration / 60)
+        if chars_per_minute < MIN_CHARS_PER_MINUTE:
+            return False
+
+    return True
 
 
 def select_preferred_language(

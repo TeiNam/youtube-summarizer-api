@@ -9,11 +9,21 @@ import logging
 
 from app.models.responses import TaskStatus
 from app.services.audio_transcriber import transcribe_audio
-from app.services.subtitle_extractor import extract_subtitles, fetch_video_title
+from app.services.subtitle_extractor import (
+    extract_subtitles,
+    fetch_video_metadata,
+    is_subtitle_sufficient,
+)
 from app.services.summary_engine import summarize_text, translate_text
 from app.services.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
+
+# 자막·음성 인식 모두 실패 시 사용자에게 보여줄 메시지
+EXTRACTION_FAILED_MESSAGE = (
+    "자막과 음성 인식을 모두 사용할 수 없는 영상입니다. "
+    "자동 자막이 없거나 불완전하고, 오디오에서도 텍스트를 추출하지 못했습니다."
+)
 
 
 async def process_summary(
@@ -43,14 +53,26 @@ async def process_summary(
         task_manager.update_status(task_id, TaskStatus.EXTRACTING)
         logger.info("작업 %s: 자막 추출 시작 (비디오: %s)", task_id, video_id)
 
-        video_title = await fetch_video_title(video_id)
+        video_title, duration = await fetch_video_metadata(video_id)
         text = await extract_subtitles(video_id)
 
-        if text is None:
-            # 자막 추출 실패 시 음성 인식으로 폴백
-            logger.info("작업 %s: 자막 없음, 음성 인식으로 폴백", task_id)
+        # 자막이 없거나 불완전하면(영상 길이 대비 너무 짧으면) 음성 인식으로 폴백
+        if not is_subtitle_sufficient(text, duration):
+            logger.info(
+                "작업 %s: 자막 없음/불충분, 음성 인식으로 폴백", task_id
+            )
             extraction_method = "transcribe"
-            text = await transcribe_audio(video_id)
+            try:
+                text = await transcribe_audio(video_id)
+            except Exception as e:
+                # 폴백까지 실패하면 사용자용 메시지로 변환 (내부 에러 노출 방지)
+                logger.error(
+                    "작업 %s: 음성 인식 폴백 실패 - %s", task_id, e, exc_info=True
+                )
+                task_manager.update_status(
+                    task_id, TaskStatus.FAILED, error=EXTRACTION_FAILED_MESSAGE
+                )
+                return
 
         # 2단계: 번역
         task_manager.update_status(task_id, TaskStatus.TRANSLATING)

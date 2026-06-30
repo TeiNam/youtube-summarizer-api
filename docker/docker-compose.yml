@@ -14,9 +14,5 @@ services:
       # ROOT_PATH: /yts/api
       TZ: Asia/Seoul
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+    # 헬스체크는 Dockerfile의 HEALTHCHECK를 사용한다.
+    # (API_PREFIX를 반영해 {prefix}/health를 호출 — 여기서 재정의하면 prefix 설정 시 404)

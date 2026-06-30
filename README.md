@@ -72,7 +72,8 @@ cd docker && docker compose up -d
 | `AWS_SECRET_ACCESS_KEY` | AWS 시크릿 키 | O |
 | `AWS_REGION` | AWS 리전 (예: `ap-northeast-2`) | O |
 | `API_KEY` | API 인증키 (미설정 시 인증 비활성화) | △ |
-| `BEDROCK_MODEL_ID` | Bedrock 모델 ID | O |
+| `BEDROCK_MODEL_ID` | Bedrock 모델 ID (요약 품질 향상 시 `anthropic.claude-opus-4-8` 권장) | O |
+| `BEDROCK_EFFORT` | 추론 강도 `low\|medium\|high\|max` (Opus 4.8/4.6·Sonnet 4.6 전용, Haiku는 비워둘 것) | △ |
 | `TRANSCRIBE_S3_BUCKET` | 음성 인식용 S3 버킷명 | △ |
 
 ## API 사용법

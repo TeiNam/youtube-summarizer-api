@@ -92,6 +92,10 @@ db.sqlite3
 instance/
 
 # === Project-specific ===
+# 에이전트/스펙 작업 디렉터리 (추적 제외)
+.kiro/
+.claude/
+
 # 오디오 임시 파일 (yt-dlp 다운로드)
 *.mp3
 *.mp4

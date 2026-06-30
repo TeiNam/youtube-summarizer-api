@@ -3,6 +3,13 @@ name: Docker Build & Push
 on:
   push:
     branches: [main]
+    # 문서/스펙만 변경된 푸시는 이미지 빌드를 건너뛴다
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.kiro/**'
+      - '.claude/**'
+      - '.env.example'
 
 env:
   REGISTRY: ghcr.io

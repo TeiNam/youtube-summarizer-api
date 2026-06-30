@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from functools import partial
+from pathlib import Path
 
 from app.services.aws_client import get_aws_client
 
@@ -22,6 +23,43 @@ logger = logging.getLogger(__name__)
 BEDROCK_MODEL_ID = os.environ.get(
     "BEDROCK_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0"
 )
+
+# 추론 강도(effort). Opus 4.8/4.6·Sonnet 4.6에서만 지원(Haiku·구형은 거부).
+# 빈 값이면 본문에 넣지 않는다. 권장: 요약은 medium, 비용 절감은 low.
+BEDROCK_EFFORT = os.environ.get("BEDROCK_EFFORT", "").strip()
+
+# 프롬프트 템플릿 디렉터리 (PROMPTS_DIR 환경변수로 재정의 가능)
+PROMPTS_DIR = Path(
+    os.environ.get("PROMPTS_DIR", Path(__file__).resolve().parent.parent / "prompts")
+)
+
+
+def _build_body(prompt: str, max_tokens: int, *, use_effort: bool) -> str:
+    """Bedrock invoke_model 요청 본문을 만든다.
+
+    use_effort=True이고 BEDROCK_EFFORT가 설정돼 있으면 output_config.effort를
+    추가한다. effort 미지원 모델(Haiku 등)에서는 환경변수를 비워 두면 된다.
+    """
+    payload: dict = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if use_effort and BEDROCK_EFFORT:
+        payload["output_config"] = {"effort": BEDROCK_EFFORT}
+    return json.dumps(payload)
+
+
+def _render_prompt(name: str, **vars: str) -> str:
+    """prompts/<name>.md 를 읽어 {{VAR}} 자리표시자를 치환한다.
+
+    매 호출마다 디스크에서 읽으므로 재배포 없이 프롬프트를 튜닝할 수 있다.
+    (파일 I/O는 Bedrock 호출 지연에 비해 무시할 수준)
+    """
+    template = (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
+    for key, value in vars.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
 
 
 def _get_bedrock_client():
@@ -67,19 +105,10 @@ async def translate_text(text: str, target_language: str = "ko") -> str:
     Raises:
         RuntimeError: Bedrock 호출 실패 시
     """
-    prompt = (
-        f"다음 텍스트를 {target_language} 언어로 번역해주세요. "
-        "번역된 텍스트만 출력하고, 다른 설명은 포함하지 마세요.\n\n"
-        f"{text}"
-    )
+    prompt = _render_prompt("translate", TARGET_LANGUAGE=target_language, TEXT=text)
 
-    body = json.dumps(
-        {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-    )
+    # 번역은 effort 불필요 (단순 변환) — 토큰 낭비 방지를 위해 미적용
+    body = _build_body(prompt, max_tokens=4096, use_effort=False)
 
     try:
         loop = asyncio.get_running_loop()
@@ -110,115 +139,10 @@ async def summarize_text(text: str) -> dict:
     Raises:
         RuntimeError: Bedrock 호출 실패 시
     """
-    prompt = (
-        "# 역할\n"
-        "당신은 유튜브 영상 콘텐츠를 심층 분석하는 전문 AI입니다.\n"
-        "영상 자막을 입력받아 핵심 내용을 빠짐없이, 그리고 **깊이 있게** 추출하여 "
-        "구조화된 요약을 제공합니다.\n"
-        "당신의 요약을 읽는 사람은 영상을 보지 않고도 핵심 논점과 근거를 완전히 이해할 수 있어야 합니다.\n\n"
-        "---\n\n"
-        "# 처리 규칙\n\n"
-        "## 1단계: 장르 자동 감지\n"
-        "자막 내용을 분석하여 아래 장르 중 하나를 판별하세요:\n"
-        "- NEWS: 뉴스, 시사, 정치, 사회 이슈\n"
-        "- LECTURE: 강의, 교육, 다큐멘터리, 지식 전달\n"
-        "- TECH: 기술, 개발, 프로그래밍, IT 리뷰\n"
-        "- BUSINESS: 비즈니스, 자기계발, 생산성, 마케팅\n"
-        "- FINANCE: 주식, 투자, 경제, 재테크\n"
-        "- OTHER: 위에 해당하지 않는 일반 콘텐츠\n\n"
-        "## 2단계: 장르별 요약 전략\n\n"
-        "### [NEWS] 뉴스/시사\n"
-        "- 육하원칙(누가, 언제, 어디서, 무엇을, 왜, 어떻게) 기반으로 사건의 전체 맥락을 정리\n"
-        "- 팩트와 의견/분석을 명확히 분리하여 각각 서술 (화자의 주장에는 근거를 함께 기록)\n"
-        "- 관련 배경 맥락(이전 사건, 정책, 이해관계자 입장 등)을 자막에서 언급된 범위 내에서 포함\n"
-        "- 이해관계자별 입장이나 반응이 있으면 각각의 논리를 정리\n"
-        "- 향후 전망이나 예상 영향을 화자의 논리 전개와 함께 시나리오별로 정리\n"
-        "- 언급된 수치(통계, 여론조사, 경제지표 등)를 정확히 기록\n\n"
-        "### [LECTURE] 강의/교육\n"
-        "- 핵심 개념과 정의를 빠짐없이 추출하고, 각 개념에 대한 설명을 충분히 포함\n"
-        "- 개념 간 관계와 논리적 흐름을 보존 (A이므로 B, B의 결과로 C 등)\n"
-        "- 강사가 든 예시, 비유, 사례를 구체적으로 기록하고 어떤 개념을 설명하기 위한 것인지 연결\n"
-        "- 강사가 특별히 강조한 포인트는 ⚡ 표시로 별도 강조\n"
-        "- 단계적 설명이 있으면 순서를 보존하고 각 단계의 목적을 명시\n"
-        "- 전문 용어가 등장하면 강사가 제시한 정의나 설명을 함께 기록\n\n"
-        "### [TECH] 기술/개발\n"
-        "- 기술 스택, 도구, 라이브러리명과 버전을 정확히 기록\n"
-        "- 코드 로직이나 구현 단계를 순서대로 정리하되, 각 단계의 이유와 목적도 포함\n"
-        "- 아키텍처 결정의 근거(왜 이 기술을 선택했는지)를 화자의 설명 범위 내에서 기록\n"
-        "- 장단점 비교가 있으면 표 형식으로 정리\n"
-        "- 트러블슈팅 팁이나 주의사항을 ⚠️ 표시로 별도 정리\n"
-        "- 성능 수치, 벤치마크, 비용 등 정량적 데이터가 있으면 정확히 기록\n\n"
-        "### [BUSINESS] 비즈니스/자기계발\n"
-        "- 핵심 프레임워크나 방법론을 단계별로 상세히 추출하고, 각 단계의 목적과 기대 효과를 서술\n"
-        "- 화자가 제시한 사례/데이터를 구체적으로 기록하고, 어떤 주장의 근거인지 연결\n"
-        "- 성공/실패 사례가 있으면 원인 분석과 교훈을 함께 정리\n"
-        "- 실행 가능한 액션 아이템을 구체적 조건, 우선순위와 함께 정리\n"
-        "- 언급된 수치(매출, 성장률, 시장 규모 등)를 정확히 기록\n"
-        "- 화자의 핵심 메시지와 그것을 뒷받침하는 논리 구조를 보존\n\n"
-        "### [FINANCE] 주식/투자\n"
-        "- 언급된 모든 종목명, 지표, 수치, 가격대를 정확히 기록\n"
-        "- 화자의 분석 논리를 단계별로 전개: 전제 → 근거(데이터/차트/지표) → 결론\n"
-        "- 매수/매도/관망 등 방향성 판단이 있으면 그 근거와 조건을 상세히 서술\n"
-        "- 리스크 요인과 시나리오별 대응 전략이 있으면 반드시 포함\n"
-        "- 시장 환경 분석(매크로, 섹터, 수급)을 화자가 언급한 범위 내에서 상세히 정리\n"
-        "- ⚠️ 투자 판단은 시청자 본인 책임임을 명시\n\n"
-        "### [OTHER] 일반 콘텐츠\n"
-        "- 화자의 핵심 주장과 그 근거를 논리적 순서로 정리\n"
-        "- 주요 에피소드, 사례, 경험담을 구체적으로 기록\n"
-        "- 화자가 전달하려는 메시지와 결론을 명확히 서술\n"
-        "- 언급된 인물, 작품, 장소 등 고유명사를 정확히 기록\n"
-        "- 감상/리뷰 콘텐츠의 경우 평가 기준과 근거를 함께 정리\n"
-        "- 화자의 추천이나 조언이 있으면 대상과 조건을 구체적으로 서술\n\n"
-        "---\n\n"
-        "# 출력 형식\n\n"
-        "반드시 아래 JSON 형식으로만 응답하세요.\n\n"
-        "```json\n"
-        "{\n"
-        '  "genre": "감지된 장르 (NEWS/LECTURE/TECH/BUSINESS/FINANCE/OTHER)",\n'
-        '  "one_line_summary": "영상 전체를 한 문장으로 압축",\n'
-        '  "detailed_summary": "마크다운 형식의 상세 요약. 아래 작성 규칙을 반드시 따를 것.",\n'
-        '  "key_insights": [\n'
-        '    "핵심 인사이트 1: 근거나 맥락을 포함하여 2~3문장으로 서술",\n'
-        '    "핵심 인사이트 2: ..."\n'
-        "  ],\n"
-        '  "keywords": [{"term": "키워드", "description": "간략한 설명"}],\n'
-        '  "further_topics": ["더 깊이 이해하려면 찾아볼 만한 관련 주제 2~3개"]\n'
-        "}\n"
-        "```\n\n"
-        "## detailed_summary 작성 규칙\n"
-        "- 마크다운 제목(##, ###)으로 주제별 섹션을 나누어 작성\n"
-        "- 각 섹션 안에서 화자의 주장/분석을 **근거와 함께** 서술 (단순 나열 금지)\n"
-        "- 화자가 언급한 구체적 수치, 이름, 날짜, 비율 등을 반드시 포함\n"
-        "- 화자의 논리 전개를 보존: '~이므로 ~하다', '~한 이유는 ~때문이다' 등 인과관계 유지\n"
-        "- 화자가 비교/대조한 내용이 있으면 양쪽을 모두 서술\n"
-        "- 자막 원문 길이에 비례하여 충분한 분량으로 작성 (짧은 영상이라도 핵심은 깊이 있게)\n"
-        "- 각 섹션은 최소 3~5문장 이상으로 구체적으로 서술\n\n"
-        "## key_insights 작성 규칙\n"
-        "- 3~7개 선별\n"
-        "- 각 인사이트는 단순 한 줄 요약이 아니라, 근거나 맥락을 포함하여 2~3문장으로 서술\n"
-        "- '이것만은 반드시 기억해야 한다'는 관점에서 선별\n\n"
-        "# 품질 원칙\n"
-        "1. 빠짐없이: 영상의 주요 논점을 하나도 빠뜨리지 않는다\n"
-        "2. 정확하게: 자막에 실제로 있는 내용만 정리한다 — 추측이나 외부 지식 추가 금지\n"
-        "3. 구조적으로: 읽기 쉽게 논리적 순서로 배치한다\n"
-        "4. 구체적으로: '상승했다'가 아니라 '90달러를 돌파했다'처럼 실제 내용을 적는다\n"
-        "5. 깊이 있게: 표면적 나열이 아니라 화자의 논리와 근거를 함께 전달한다\n"
-        "6. 비례적으로: 텍스트 길이에 비례하여 요약 분량을 조절하되, 핵심은 항상 충분히 서술\n\n"
-        "# 자막 품질 대응\n"
-        "- 자동 생성 자막의 경우 고유명사나 전문 용어가 잘못 표기되었을 수 있으므로 문맥에 맞게 보정\n"
-        "- 자막이 불완전한 구간은 [자막 불명확]으로 표시\n"
-        "- 절대로 자막에 없는 내용을 임의로 채워 넣지 않는다\n\n"
-        "---\n\n"
-        f"[자막 원문]\n{text}"
-    )
+    prompt = _render_prompt("summarize", TEXT=text)
 
-    body = json.dumps(
-        {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 16384,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-    )
+    # 요약은 심층 분석이므로 effort 적용 대상 (BEDROCK_EFFORT 설정 시)
+    body = _build_body(prompt, max_tokens=16384, use_effort=True)
 
     try:
         loop = asyncio.get_running_loop()

@@ -7,7 +7,41 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from app.services.subtitle_extractor import select_preferred_language
+from app.services.subtitle_extractor import (
+    is_subtitle_sufficient,
+    select_preferred_language,
+)
+
+
+# =============================================================================
+# 단위 테스트: 자막 충분성 게이트
+# =============================================================================
+
+
+class TestIsSubtitleSufficient:
+    """자막이 요약에 쓸 만큼 충분한지 판정하는 게이트 테스트"""
+
+    def test_none_is_insufficient(self) -> None:
+        assert is_subtitle_sufficient(None, 60) is False
+
+    def test_empty_is_insufficient(self) -> None:
+        assert is_subtitle_sufficient("   ", 60) is False
+
+    def test_below_min_chars_is_insufficient(self) -> None:
+        """절대 하한(100자) 미만이면 길이와 무관하게 불충분."""
+        assert is_subtitle_sufficient("short text", 60) is False
+
+    def test_long_enough_with_no_duration_is_sufficient(self) -> None:
+        """duration이 없으면 절대 하한만 통과하면 충분으로 본다."""
+        assert is_subtitle_sufficient("a" * 200, None) is True
+
+    def test_sparse_subtitle_for_long_video_is_insufficient(self) -> None:
+        """긴 영상(30분)에 자막이 200자뿐이면 분당 글자수 미달로 불충분."""
+        assert is_subtitle_sufficient("a" * 200, 1800) is False
+
+    def test_dense_subtitle_is_sufficient(self) -> None:
+        """1분 영상에 충분한 분량의 자막이면 충분."""
+        assert is_subtitle_sufficient("a" * 800, 60) is True
 
 
 # --- 언어 코드 생성 전략 ---
