@@ -108,7 +108,7 @@ async def translate_text(text: str, target_language: str = "ko") -> str:
     prompt = _render_prompt("translate", TARGET_LANGUAGE=target_language, TEXT=text)
 
     # 번역은 effort 불필요 (단순 변환) — 토큰 낭비 방지를 위해 미적용
-    body = _build_body(prompt, max_tokens=4096, use_effort=False)
+    body = _build_body(prompt, max_tokens=20000, use_effort=False)
 
     try:
         loop = asyncio.get_running_loop()
@@ -142,7 +142,7 @@ async def summarize_text(text: str) -> dict:
     prompt = _render_prompt("summarize", TEXT=text)
 
     # 요약은 심층 분석이므로 effort 적용 대상 (BEDROCK_EFFORT 설정 시)
-    body = _build_body(prompt, max_tokens=16384, use_effort=True)
+    body = _build_body(prompt, max_tokens=20000, use_effort=True)
 
     try:
         loop = asyncio.get_running_loop()
