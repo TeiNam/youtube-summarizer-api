@@ -62,6 +62,18 @@ def _render_prompt(name: str, **vars: str) -> str:
     return template
 
 
+def _extract_text(content: list[dict]) -> str:
+    """content 블록 목록에서 첫 번째 text 블록을 찾아 반환한다.
+
+    Sonnet 5+ 모델은 기본적으로 thinking이 켜져 있어 content[0]이
+    thinking 블록일 수 있으므로 인덱스 고정 대신 type으로 찾는다.
+    """
+    for block in content:
+        if block.get("type") == "text":
+            return block["text"]
+    raise ValueError(f"text 블록을 찾을 수 없음: {content}")
+
+
 def _get_bedrock_client():
     """Bedrock Runtime 클라이언트를 생성한다."""
     return get_aws_client("bedrock-runtime")
@@ -115,7 +127,7 @@ async def translate_text(text: str, target_language: str = "ko") -> str:
         response_body = await loop.run_in_executor(
             None, partial(_invoke_bedrock_sync, body)
         )
-        translated = response_body["content"][0]["text"]
+        translated = _extract_text(response_body["content"])
         logger.info("번역 완료 (대상 언어: %s)", target_language)
         return translated
 
@@ -149,7 +161,7 @@ async def summarize_text(text: str) -> dict:
         response_body = await loop.run_in_executor(
             None, partial(_invoke_bedrock_sync, body)
         )
-        result_text = response_body["content"][0]["text"]
+        result_text = _extract_text(response_body["content"])
 
         # JSON 블록 추출 (```json ... ``` 형식 처리)
         if "```json" in result_text:
