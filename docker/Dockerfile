@@ -22,10 +22,19 @@ FROM python:3.12-slim AS runtime
 
 # 시스템 의존성 (yt-dlp에 ffmpeg 필요)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg curl ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
     # 비루트 사용자 생성
     useradd --create-home --shell /bin/bash appuser
+
+# IAM Roles Anywhere 자격증명 헬퍼 — 장기 액세스 키 없이 임시 자격증명을 받는다.
+# 이미지에 담아 어느 호스트에서 띄워도 같은 동작을 보장한다. 버전·SHA256 고정.
+ARG AWS_SIGNING_HELPER_VERSION=1.8.4
+ARG AWS_SIGNING_HELPER_SHA256=b7568acd6e1517a4e1adaee68d52bfd6284a0e5305677166cd83d43a07c815c9
+RUN curl -fsSL -o /usr/local/bin/aws_signing_helper \
+      "https://rolesanywhere.amazonaws.com/releases/${AWS_SIGNING_HELPER_VERSION}/X86_64/Linux/Amzn2023/aws_signing_helper" \
+    && echo "${AWS_SIGNING_HELPER_SHA256}  /usr/local/bin/aws_signing_helper" | sha256sum -c - \
+    && chmod 755 /usr/local/bin/aws_signing_helper
 
 WORKDIR /app
 

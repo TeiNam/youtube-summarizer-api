@@ -13,6 +13,12 @@ services:
       # API_PREFIX: /yts/api
       # ROOT_PATH: /yts/api
       TZ: Asia/Seoul
+      # credential_process 는 셸을 거치지 않아 ~ 가 확장되지 않는다 — 절대 경로로 지정.
+      AWS_CONFIG_FILE: /app/.aws/config
+    volumes:
+      # IAM Roles Anywhere 인증서·개인키(읽기 전용). 개인키는 600, 컨테이너 UID 소유.
+      - ${HOST_STATE_DIR:?HOST_STATE_DIR 이 필요하다 — 인증서 마운트 경로}/aws-ra:/app/.aws-ra:ro
+      - ${HOST_STATE_DIR:?HOST_STATE_DIR 이 필요하다 — 인증서 마운트 경로}/aws-config:/app/.aws:ro
     restart: unless-stopped
     # 헬스체크는 Dockerfile의 HEALTHCHECK를 사용한다.
     # (API_PREFIX를 반영해 {prefix}/health를 호출 — 여기서 재정의하면 prefix 설정 시 404)

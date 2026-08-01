@@ -1,0 +1,31 @@
+# NAS 배포용 — GHCR 이미지를 pull 해서 띄운다(로컬 빌드는 docker-compose.yml 을 쓴다).
+#
+# 사용법(NAS):
+#   cd /volume1/docker/youtube-summarizer
+#   HOST_STATE_DIR=$PWD docker compose -f docker-compose.nas.yml up -d
+#
+# 원래 Container Manager(DSM UI)로 띄우고 환경변수를 UI 에 박아 두었는데, IAM Roles Anywhere
+# 인증서를 볼륨으로 마운트해야 해서 compose 로 옮겼다. 다른 두 앱(english-note, moneylog)과
+# 같은 방식이 되어 이후 설정 변경이 파일 편집으로 끝난다.
+
+services:
+  api:
+    image: ghcr.io/teinam/youtube-summarizer-api:latest
+    container_name: youtube-summarizer-api
+    pull_policy: always
+    ports:
+      - "8008:8000"
+    # AWS_PROFILE·API_KEY·BEDROCK_* 등은 이 파일에서 읽는다(UI 에 박아 두지 않는다).
+    env_file:
+      - ${ENV_FILE:-.env}
+    environment:
+      TZ: Asia/Seoul
+      # credential_process 는 셸을 거치지 않아 ~ 가 확장되지 않는다 — 절대 경로로 지정.
+      AWS_CONFIG_FILE: /app/.aws/config
+    volumes:
+      # IAM Roles Anywhere 인증서·개인키(읽기 전용). 키는 600, 컨테이너 UID 소유여야 한다.
+      # 인증서가 없으면 Bedrock·S3·Transcribe 호출이 자격증명 없음으로 실패한다.
+      - ${HOST_STATE_DIR:?HOST_STATE_DIR 이 필요하다 — 인증서 마운트 경로}/aws-ra:/app/.aws-ra:ro
+      - ${HOST_STATE_DIR:?HOST_STATE_DIR 이 필요하다 — 인증서 마운트 경로}/aws-config:/app/.aws:ro
+    restart: unless-stopped
+    # 헬스체크는 Dockerfile 의 HEALTHCHECK 를 쓴다(API_PREFIX 를 반영한 경로를 호출한다).
