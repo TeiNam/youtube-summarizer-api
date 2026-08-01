@@ -36,7 +36,20 @@ async def health_check():
     return {"status": "ok"}
 
 
-@router.post("/summarize", status_code=202, response_model=TaskResponse)
+@router.post(
+    "/summarize",
+    status_code=202,
+    response_model=TaskResponse,
+    # 오류 응답도 스키마에 넣는다 — 안 넣으면 생성된 OpenAPI 에 202 만 남아
+    # SDK 클라이언트가 SERVICE_BUSY·Retry-After 를 알 수 없다.
+    responses={
+        422: {"model": ErrorResponse, "description": "유효하지 않은 URL 또는 요청 형식"},
+        503: {
+            "model": ErrorResponse,
+            "description": "처리 대기 작업이 상한에 도달 (Retry-After 헤더 참고)",
+        },
+    },
+)
 async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks):
     """유튜브 영상 요약 작업을 요청한다.
 
@@ -49,6 +62,7 @@ async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks
     Returns:
         202 응답: 작업 ID와 상태 (pending)
         422 응답: 유효하지 않은 URL인 경우 오류 정보
+        503 응답: 처리 대기 작업이 상한에 도달한 경우 (Retry-After: 60)
     """
     # URL 검증 및 비디오 ID 추출
     try:
@@ -88,7 +102,11 @@ async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks
     return TaskResponse(task_id=task_id, status=TaskStatus.PENDING)
 
 
-@router.get("/tasks/{task_id}", response_model=TaskDetailResponse)
+@router.get(
+    "/tasks/{task_id}",
+    response_model=TaskDetailResponse,
+    responses={404: {"model": ErrorResponse, "description": "존재하지 않는 작업 ID"}},
+)
 async def get_task(task_id: str):
     """작업 ID로 상태를 조회한다.
 

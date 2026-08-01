@@ -503,6 +503,21 @@ class TestTaskManagerEviction:
         finally:
             task_manager._tasks.clear()
 
+    def test_openapi_declares_error_responses(self) -> None:
+        """503·422·404 가 OpenAPI 스키마에 선언되어야 한다.
+
+        선언하지 않으면 생성된 스펙에 202/200 만 남아 SDK 클라이언트가 SERVICE_BUSY 와
+        Retry-After 를 알 수 없다(4차 리뷰에서 잡힌 결함).
+        """
+        schema = app.openapi()
+        summarize_codes = set(schema["paths"][f"{PREFIX}/summarize"]["post"]["responses"])
+        task_codes = set(
+            schema["paths"][f"{PREFIX}/tasks/{{task_id}}"]["get"]["responses"]
+        )
+
+        assert {"202", "422", "503"} <= summarize_codes, summarize_codes
+        assert "404" in task_codes, task_codes
+
     def test_get_task_returns_copy(self) -> None:
         """조회 결과를 고쳐도 내부 상태가 바뀌지 않아야 한다."""
         manager = TaskManager()
@@ -702,6 +717,10 @@ class TestS3CleanupOnCancel:
             time.sleep(0.2)
             return f"s3://bucket/{s3_key}"
 
+        # 다른 테스트가 남긴 정리 작업을 먼저 비운다 — 안 그러면 이 테스트의
+        # mock_delete 가 그것들까지 세어 호출 횟수가 어긋난다
+        at.wait_for_cleanups()
+
         with (
             patch.object(at, "_download_and_upload_sync", fake_prepare),
             patch.object(at, "_start_transcription_job"),
@@ -712,8 +731,83 @@ class TestS3CleanupOnCancel:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+            # 정리는 취소를 삼키지 않기 위해 별도 스레드로 넘긴다 — 완료를 기다린다
+            at.wait_for_cleanups()
 
         mock_delete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_propagates_not_swallowed(self) -> None:
+        """취소는 반드시 전파되어야 한다 (정리가 삼켜서는 안 된다).
+
+        finally 에서 await 하며 CancelledError 를 suppress 하면 취소된 태스크가
+        정상 반환하고 cancelled() 가 False 가 된다 — 구조적 동시성이 깨진다
+        (4차 리뷰에서 잡힌 결함).
+        """
+        from app.services import audio_transcriber as at
+
+        at.wait_for_cleanups()  # 다른 테스트가 남긴 정리 작업 배제
+
+        def fake_prepare(video_id, job_name, s3_key, uploaded_keys):
+            uploaded_keys.add(s3_key)
+            return f"s3://bucket/{s3_key}"
+
+        async def slow_wait(_job_name):
+            await asyncio.sleep(0.15)
+            return "결과텍스트"
+
+        with (
+            patch.object(at, "_download_and_upload_sync", fake_prepare),
+            patch.object(at, "_start_transcription_job"),
+            patch.object(at, "_wait_for_transcription", slow_wait),
+            patch.object(at, "_delete_from_s3"),
+        ):
+            task = asyncio.create_task(at.transcribe_audio("test_vid"))
+            await asyncio.sleep(0.05)  # 업로드는 끝나고 Transcribe 대기 중인 시점
+            task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert task.cancelled(), "취소가 삼켜져 정상 완료로 위장됐다"
+            at.wait_for_cleanups()
+
+    @pytest.mark.asyncio
+    async def test_delete_skipped_when_upload_drain_times_out(self) -> None:
+        """업로드 완료를 기다리다 타임아웃하면 삭제를 건너뛰어야 한다.
+
+        기다림을 포기하고 바로 삭제하면 삭제가 먼저 나가고 그 뒤 업로드가 완료되어
+        객체가 남는다(4차 리뷰에서 잡힌 결함).
+        """
+        from app.services import audio_transcriber as at
+
+        at.wait_for_cleanups()
+
+        order: list[str] = []
+        upload_started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def slow_prepare(video_id, job_name, s3_key, uploaded_keys):
+            uploaded_keys.add(s3_key)
+            loop.call_soon_threadsafe(upload_started.set)
+            time.sleep(0.4)  # drain 타임아웃보다 훨씬 길게
+            order.append("upload_done")
+            return f"s3://bucket/{s3_key}"
+
+        with (
+            patch.object(at, "UPLOAD_DRAIN_TIMEOUT", 0.05),
+            patch.object(at, "_download_and_upload_sync", slow_prepare),
+            patch.object(at, "_start_transcription_job"),
+            patch.object(at, "_delete_from_s3", lambda key: order.append("delete")),
+        ):
+            task = asyncio.create_task(at.transcribe_audio("test_vid"))
+            await upload_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.6)  # 업로드 스레드 종료 대기
+            at.wait_for_cleanups()
+
+        assert order[:1] != ["delete"], f"삭제가 업로드를 앞질렀다: {order}"
 
 
 # =============================================================================
