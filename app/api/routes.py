@@ -4,12 +4,11 @@ POST /summarize - 유튜브 영상 요약 작업 요청
 GET /tasks/{task_id} - 작업 상태 조회
 """
 
-import json
 import logging
 
 from fastapi import APIRouter, BackgroundTasks
-from fastapi.responses import JSONResponse
 
+from app.models.json_response import UnicodeJSONResponse
 from app.models.requests import SummarizeRequest
 from app.models.responses import (
     ErrorDetail,
@@ -19,23 +18,10 @@ from app.models.responses import (
     TaskStatus,
 )
 from app.services.pipeline import process_summary
-from app.services.task_manager import TaskManager
+from app.services.task_manager import TaskManager, TaskRejectedError
 from app.services.url_validator import validate_youtube_url
 
 logger = logging.getLogger(__name__)
-
-
-class UnicodeJSONResponse(JSONResponse):
-    """한글 등 비ASCII 문자를 이스케이프하지 않는 JSON 응답 클래스"""
-
-    def render(self, content) -> bytes:
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False,
-            indent=None,
-            separators=(",", ":"),
-        ).encode("utf-8")
 
 
 # 모듈 레벨 싱글톤 TaskManager 인스턴스
@@ -50,7 +36,20 @@ async def health_check():
     return {"status": "ok"}
 
 
-@router.post("/summarize", status_code=202, response_model=TaskResponse)
+@router.post(
+    "/summarize",
+    status_code=202,
+    response_model=TaskResponse,
+    # 오류 응답도 스키마에 넣는다 — 안 넣으면 생성된 OpenAPI 에 202 만 남아
+    # SDK 클라이언트가 SERVICE_BUSY·Retry-After 를 알 수 없다.
+    responses={
+        422: {"model": ErrorResponse, "description": "유효하지 않은 URL 또는 요청 형식"},
+        503: {
+            "model": ErrorResponse,
+            "description": "처리 대기 작업이 상한에 도달 (Retry-After 헤더 참고)",
+        },
+    },
+)
 async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks):
     """유튜브 영상 요약 작업을 요청한다.
 
@@ -63,6 +62,7 @@ async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks
     Returns:
         202 응답: 작업 ID와 상태 (pending)
         422 응답: 유효하지 않은 URL인 경우 오류 정보
+        503 응답: 처리 대기 작업이 상한에 도달한 경우 (Retry-After: 60)
     """
     # URL 검증 및 비디오 ID 추출
     try:
@@ -74,8 +74,24 @@ async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks
         )
         return UnicodeJSONResponse(status_code=422, content=error_response.model_dump())
 
-    # 작업 생성
-    task_id = task_manager.create_task(request.url, request.target_language)
+    # 작업 생성 (상한이 가득 차면 503 으로 거절한다 — 접수만 받고 무한히 쌓아 두면
+    # 202 를 받은 요청들이 메모리만 먹다가 프로세스가 죽는다)
+    try:
+        task_id = task_manager.create_task(request.url, request.target_language)
+    except TaskRejectedError as e:
+        logger.warning("작업 접수 거절: %s", e)
+        error_response = ErrorResponse(
+            error=ErrorDetail(
+                code="SERVICE_BUSY",
+                message="처리 대기 중인 작업이 많습니다. 잠시 후 다시 시도해 주세요.",
+            )
+        )
+        return UnicodeJSONResponse(
+            status_code=503,
+            content=error_response.model_dump(),
+            headers={"Retry-After": "60"},
+        )
+
     logger.info("작업 생성 완료: %s (비디오: %s)", task_id, video_id)
 
     # 백그라운드에서 파이프라인 실행
@@ -86,7 +102,11 @@ async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks
     return TaskResponse(task_id=task_id, status=TaskStatus.PENDING)
 
 
-@router.get("/tasks/{task_id}", response_model=TaskDetailResponse)
+@router.get(
+    "/tasks/{task_id}",
+    response_model=TaskDetailResponse,
+    responses={404: {"model": ErrorResponse, "description": "존재하지 않는 작업 ID"}},
+)
 async def get_task(task_id: str):
     """작업 ID로 상태를 조회한다.
 

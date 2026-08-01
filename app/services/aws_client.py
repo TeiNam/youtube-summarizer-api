@@ -1,16 +1,22 @@
 """AWS 클라이언트 팩토리 모듈
 
-.env 파일의 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY를 사용하여
-boto3 클라이언트를 생성한다. 모든 AWS 서비스 호출에서 이 모듈을 통해
-클라이언트를 생성하여 자격 증명을 일관되게 관리한다.
+모든 AWS 서비스 호출은 이 모듈을 통해 클라이언트를 생성한다.
+
+자격증명은 IAM Roles Anywhere 를 쓴다 — AWS_PROFILE 만 주면 boto3 기본 체인이
+~/.aws/config(컨테이너는 AWS_CONFIG_FILE)의 credential_process 를 실행해 임시
+자격증명을 받는다. 이 모듈은 자격증명을 직접 다루지 않는다.
+
+AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY 분기는 롤백용으로만 남겨 둔다. 값이 있으면
+그 키가 프로파일보다 우선하므로 이관 후에는 환경에서 지워야 한다.
 """
 
 import os
+from functools import lru_cache
 
 import boto3
 from botocore.config import Config
 
-# AWS 자격 증명 (환경변수에서 로드)
+# 레거시 액세스 키 (이관 후에는 비어 있다 — 롤백 경로로만 남겨 둔다)
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -23,18 +29,24 @@ _BEDROCK_CONFIG = Config(
 )
 
 
+@lru_cache(maxsize=None)
 def get_aws_client(service_name: str):
-    """AWS boto3 클라이언트를 생성한다.
+    """AWS boto3 클라이언트를 반환한다 (서비스별로 캐시).
 
-    환경변수에 access key/secret key가 설정되어 있으면
-    명시적으로 자격 증명을 전달하고, 없으면 boto3 기본 체인을 사용한다.
+    기본은 boto3 기본 체인이다(= AWS_PROFILE 의 credential_process → 임시 자격증명).
+    레거시 액세스 키가 환경에 남아 있으면 그것을 명시 전달한다(롤백 경로).
     bedrock-runtime 서비스는 별도 타임아웃 설정을 적용한다.
+
+    클라이언트를 캐시하는 이유는 두 가지다. HTTP 연결 풀을 재사용하고,
+    Roles Anywhere 에서 매 호출마다 credential_process(helper 프로세스 실행)가
+    다시 도는 것을 막는다. boto3 client 는 스레드 안전하므로 공유해도 된다.
+    자격증명 갱신은 클라이언트가 아니라 세션이 담당하므로 캐시해도 만료되지 않는다.
 
     Args:
         service_name: AWS 서비스 이름 (예: "bedrock-runtime", "s3", "transcribe")
 
     Returns:
-        boto3 클라이언트 인스턴스
+        boto3 클라이언트 인스턴스 (같은 service_name 이면 동일 인스턴스)
     """
     kwargs = {"region_name": AWS_REGION}
 

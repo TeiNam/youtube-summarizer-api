@@ -47,7 +47,7 @@ class TestPipelineSubtitleSuccess:
     @patch("app.services.pipeline.fetch_video_metadata", new_callable=AsyncMock)
     @patch("app.services.pipeline.summarize_text", new_callable=AsyncMock)
     @patch("app.services.pipeline.translate_text", new_callable=AsyncMock)
-    @patch("app.services.pipeline.extract_subtitles", new_callable=AsyncMock)
+    @patch("app.services.pipeline.extract_subtitles_with_language", new_callable=AsyncMock)
     async def test_full_pipeline_with_subtitle(
         self,
         mock_extract: AsyncMock,
@@ -61,7 +61,7 @@ class TestPipelineSubtitleSuccess:
 
         # 모킹 설정
         mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
-        mock_extract.return_value = SUFFICIENT_SUBTITLE
+        mock_extract.return_value = (SUFFICIENT_SUBTITLE, "en")
         mock_translate.return_value = "이것은 자막 텍스트입니다."
         mock_summarize.return_value = {
             "summary": "자막 요약입니다.",
@@ -99,7 +99,7 @@ class TestPipelineTranscribeFallback:
     @patch("app.services.pipeline.summarize_text", new_callable=AsyncMock)
     @patch("app.services.pipeline.translate_text", new_callable=AsyncMock)
     @patch("app.services.pipeline.transcribe_audio", new_callable=AsyncMock)
-    @patch("app.services.pipeline.extract_subtitles", new_callable=AsyncMock)
+    @patch("app.services.pipeline.extract_subtitles_with_language", new_callable=AsyncMock)
     async def test_fallback_to_transcribe_on_subtitle_none(
         self,
         mock_extract: AsyncMock,
@@ -114,7 +114,7 @@ class TestPipelineTranscribeFallback:
 
         # 자막 추출 실패 (None 반환), 음성 인식 성공
         mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
-        mock_extract.return_value = None
+        mock_extract.return_value = (None, None)
         mock_transcribe.return_value = "Transcribed audio text."
         mock_translate.return_value = "음성 인식된 텍스트입니다."
         mock_summarize.return_value = {
@@ -147,7 +147,7 @@ class TestPipelineExtractionFailure:
     @pytest.mark.asyncio
     @patch("app.services.pipeline.fetch_video_metadata", new_callable=AsyncMock)
     @patch("app.services.pipeline.transcribe_audio", new_callable=AsyncMock)
-    @patch("app.services.pipeline.extract_subtitles", new_callable=AsyncMock)
+    @patch("app.services.pipeline.extract_subtitles_with_language", new_callable=AsyncMock)
     async def test_both_extraction_methods_fail(
         self,
         mock_extract: AsyncMock,
@@ -161,7 +161,7 @@ class TestPipelineExtractionFailure:
         task_id = _create_task(task_manager)
 
         mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
-        mock_extract.return_value = None
+        mock_extract.return_value = (None, None)
         mock_transcribe.side_effect = RuntimeError("오디오 다운로드 실패")
 
         await process_summary(task_id, "fail_vid", "ko", task_manager)
@@ -185,7 +185,7 @@ class TestPipelineTranslationFailure:
     @pytest.mark.asyncio
     @patch("app.services.pipeline.fetch_video_metadata", new_callable=AsyncMock)
     @patch("app.services.pipeline.translate_text", new_callable=AsyncMock)
-    @patch("app.services.pipeline.extract_subtitles", new_callable=AsyncMock)
+    @patch("app.services.pipeline.extract_subtitles_with_language", new_callable=AsyncMock)
     async def test_translation_failure_sets_failed_status(
         self,
         mock_extract: AsyncMock,
@@ -193,19 +193,26 @@ class TestPipelineTranslationFailure:
         mock_metadata: AsyncMock,
         task_manager: TaskManager,
     ) -> None:
-        """번역 실패 시 상태가 failed여야 한다."""
+        """번역 실패 시 상태가 failed이고 내부 오류는 노출되지 않아야 한다."""
+        from app.services.pipeline import STAGE_FAILED_MESSAGES
+
         task_id = _create_task(task_manager)
 
         mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
-        mock_extract.return_value = SUFFICIENT_SUBTITLE
-        mock_translate.side_effect = RuntimeError("번역 실패: Bedrock 서비스 오류")
+        mock_extract.return_value = (SUFFICIENT_SUBTITLE, "en")
+        mock_translate.side_effect = RuntimeError(
+            "번역 실패: Bedrock 서비스 오류 (modelId=global.anthropic.claude-opus-5)"
+        )
 
         await process_summary(task_id, "trans_fail", "ko", task_manager)
 
         task = task_manager.get_task(task_id)
         assert task is not None
         assert task["status"] == TaskStatus.FAILED
-        assert "번역 실패" in task["error"]
+        # 번역 단계에서 멈췄음은 알려주되, 내부 상세는 감춘다
+        assert task["error"] == STAGE_FAILED_MESSAGES[TaskStatus.TRANSLATING]
+        assert "Bedrock" not in task["error"]
+        assert "modelId" not in task["error"]
 
 
 # =============================================================================
@@ -220,7 +227,7 @@ class TestPipelineSummarizationFailure:
     @patch("app.services.pipeline.fetch_video_metadata", new_callable=AsyncMock)
     @patch("app.services.pipeline.summarize_text", new_callable=AsyncMock)
     @patch("app.services.pipeline.translate_text", new_callable=AsyncMock)
-    @patch("app.services.pipeline.extract_subtitles", new_callable=AsyncMock)
+    @patch("app.services.pipeline.extract_subtitles_with_language", new_callable=AsyncMock)
     async def test_summarization_failure_sets_failed_status(
         self,
         mock_extract: AsyncMock,
@@ -229,17 +236,24 @@ class TestPipelineSummarizationFailure:
         mock_metadata: AsyncMock,
         task_manager: TaskManager,
     ) -> None:
-        """요약 실패 시 상태가 failed여야 한다."""
+        """요약 실패 시 상태가 failed이고 내부 오류는 노출되지 않아야 한다."""
+        from app.services.pipeline import STAGE_FAILED_MESSAGES
+
         task_id = _create_task(task_manager)
 
         mock_metadata.return_value = ("Test Title", 60, "2026-06-15")
-        mock_extract.return_value = SUFFICIENT_SUBTITLE
+        mock_extract.return_value = (SUFFICIENT_SUBTITLE, "en")
         mock_translate.return_value = "번역된 텍스트."
-        mock_summarize.side_effect = RuntimeError("요약 실패: Bedrock 서비스 오류")
+        mock_summarize.side_effect = RuntimeError(
+            "요약 실패: S3 버킷 test-audio-summary-319165777726 접근 거부"
+        )
 
         await process_summary(task_id, "sum_fail", "ko", task_manager)
 
         task = task_manager.get_task(task_id)
         assert task is not None
         assert task["status"] == TaskStatus.FAILED
-        assert "요약 실패" in task["error"]
+        assert task["error"] == STAGE_FAILED_MESSAGES[TaskStatus.SUMMARIZING]
+        # 버킷명·계정 ID 가 클라이언트로 새지 않아야 한다
+        assert "test-audio-summary" not in task["error"]
+        assert "319165777726" not in task["error"]
