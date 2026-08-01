@@ -4,12 +4,11 @@ POST /summarize - 유튜브 영상 요약 작업 요청
 GET /tasks/{task_id} - 작업 상태 조회
 """
 
-import json
 import logging
 
 from fastapi import APIRouter, BackgroundTasks
-from fastapi.responses import JSONResponse
 
+from app.models.json_response import UnicodeJSONResponse
 from app.models.requests import SummarizeRequest
 from app.models.responses import (
     ErrorDetail,
@@ -23,19 +22,6 @@ from app.services.task_manager import TaskManager
 from app.services.url_validator import validate_youtube_url
 
 logger = logging.getLogger(__name__)
-
-
-class UnicodeJSONResponse(JSONResponse):
-    """한글 등 비ASCII 문자를 이스케이프하지 않는 JSON 응답 클래스"""
-
-    def render(self, content) -> bytes:
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False,
-            indent=None,
-            separators=(",", ":"),
-        ).encode("utf-8")
 
 
 # 모듈 레벨 싱글톤 TaskManager 인스턴스

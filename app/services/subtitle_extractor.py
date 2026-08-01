@@ -136,8 +136,12 @@ def select_preferred_language(
     return available_languages[0]
 
 
-def _extract_subtitles_sync(video_id: str) -> Optional[str]:
-    """유튜브 영상에서 자막 텍스트를 동기적으로 추출한다 (스레드풀에서 실행용)."""
+def _extract_subtitles_sync(video_id: str) -> tuple[Optional[str], Optional[str]]:
+    """유튜브 영상에서 자막 텍스트를 동기적으로 추출한다 (스레드풀에서 실행용).
+
+    Returns:
+        (자막 텍스트, 선택된 언어 코드). 자막이 없으면 (None, None).
+    """
     api = YouTubeTranscriptApi()
     transcript_list = api.list(video_id)
 
@@ -162,7 +166,7 @@ def _extract_subtitles_sync(video_id: str) -> Optional[str]:
 
     if selected_language is None:
         logger.warning("비디오 %s: 사용 가능한 자막이 없습니다", video_id)
-        return None
+        return None, None
 
     # 선택된 언어로 자막 가져오기
     fetched = api.fetch(video_id, languages=[selected_language])
@@ -174,21 +178,23 @@ def _extract_subtitles_sync(video_id: str) -> Optional[str]:
     logger.info(
         "비디오 %s: 자막 추출 성공 (언어: %s)", video_id, selected_language
     )
-    return full_text
+    return full_text, selected_language
 
 
-async def extract_subtitles(video_id: str) -> Optional[str]:
-    """유튜브 영상에서 자막 텍스트를 추출한다.
+async def extract_subtitles_with_language(
+    video_id: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """자막 텍스트와 그 언어 코드를 함께 추출한다.
 
     youtube-transcript-api를 사용하여 자막 데이터를 가져온다.
     동기 I/O를 스레드풀에서 실행하여 이벤트 루프를 블로킹하지 않는다.
-    자막이 없거나 추출에 실패하면 None을 반환하여 음성 인식기로 폴백한다.
+    자막이 없거나 추출에 실패하면 (None, None)을 반환하여 음성 인식기로 폴백한다.
 
     Args:
         video_id: 유튜브 비디오 ID (11자리)
 
     Returns:
-        추출된 자막 텍스트. 자막이 없거나 오류 발생 시 None.
+        (자막 텍스트, 언어 코드). 자막이 없거나 오류 시 (None, None).
     """
     try:
         loop = asyncio.get_running_loop()
@@ -198,10 +204,25 @@ async def extract_subtitles(video_id: str) -> Optional[str]:
     except (TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
         # 자막이 비활성화되었거나 가져올 수 없는 경우
         logger.warning("비디오 %s: 자막을 가져올 수 없습니다 - %s", video_id, e)
-        return None
+        return None, None
     except Exception as e:
         # 예상치 못한 오류
         logger.error(
             "비디오 %s: 자막 추출 중 오류 발생 - %s", video_id, e, exc_info=True
         )
-        return None
+        return None, None
+
+
+async def extract_subtitles(video_id: str) -> Optional[str]:
+    """유튜브 영상에서 자막 텍스트만 추출한다.
+
+    언어 코드까지 필요하면 extract_subtitles_with_language 를 쓴다.
+
+    Args:
+        video_id: 유튜브 비디오 ID (11자리)
+
+    Returns:
+        추출된 자막 텍스트. 자막이 없거나 오류 발생 시 None.
+    """
+    text, _language = await extract_subtitles_with_language(video_id)
+    return text

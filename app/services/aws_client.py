@@ -11,6 +11,7 @@ AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY 분기는 롤백용으로만 남겨 둔�
 """
 
 import os
+from functools import lru_cache
 
 import boto3
 from botocore.config import Config
@@ -28,18 +29,24 @@ _BEDROCK_CONFIG = Config(
 )
 
 
+@lru_cache(maxsize=None)
 def get_aws_client(service_name: str):
-    """AWS boto3 클라이언트를 생성한다.
+    """AWS boto3 클라이언트를 반환한다 (서비스별로 캐시).
 
     기본은 boto3 기본 체인이다(= AWS_PROFILE 의 credential_process → 임시 자격증명).
     레거시 액세스 키가 환경에 남아 있으면 그것을 명시 전달한다(롤백 경로).
     bedrock-runtime 서비스는 별도 타임아웃 설정을 적용한다.
 
+    클라이언트를 캐시하는 이유는 두 가지다. HTTP 연결 풀을 재사용하고,
+    Roles Anywhere 에서 매 호출마다 credential_process(helper 프로세스 실행)가
+    다시 도는 것을 막는다. boto3 client 는 스레드 안전하므로 공유해도 된다.
+    자격증명 갱신은 클라이언트가 아니라 세션이 담당하므로 캐시해도 만료되지 않는다.
+
     Args:
         service_name: AWS 서비스 이름 (예: "bedrock-runtime", "s3", "transcribe")
 
     Returns:
-        boto3 클라이언트 인스턴스
+        boto3 클라이언트 인스턴스 (같은 service_name 이면 동일 인스턴스)
     """
     kwargs = {"region_name": AWS_REGION}
 

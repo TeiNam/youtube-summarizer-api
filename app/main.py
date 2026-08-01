@@ -12,30 +12,20 @@ load_dotenv(override=False)
 import logging
 import json
 import os
+import secrets
 import sys
 import time
 from datetime import datetime, timezone
 
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes import router
+from app.models.json_response import UnicodeJSONResponse
 from app.models.responses import ErrorDetail, ErrorResponse
-
-
-class UnicodeJSONResponse(JSONResponse):
-    """한글 등 비ASCII 문자를 이스케이프하지 않는 JSON 응답 클래스"""
-
-    def render(self, content) -> bytes:
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False,
-            indent=None,
-            separators=(",", ":"),
-        ).encode("utf-8")
 
 
 class JsonFormatter(logging.Formatter):
@@ -84,17 +74,6 @@ app = FastAPI(
 )
 
 # ---------------------------------------------------------------------------
-# CORS 미들웨어 (Obsidian 플러그인 등 cross-origin 요청 허용)
-# ---------------------------------------------------------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ---------------------------------------------------------------------------
 # 글로벌 예외 핸들러
 # ---------------------------------------------------------------------------
 
@@ -120,6 +99,34 @@ async def timeout_exception_handler(request: Request, exc: Exception) -> JSONRes
         )
     )
     return UnicodeJSONResponse(status_code=504, content=error_response.model_dump())
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """요청 본문 검증 실패 핸들러 (422)
+
+    FastAPI 기본 형식({"detail": [...]})이 아니라 이 API 의 오류 봉투로 맞춘다 —
+    클라이언트가 오류를 한 가지 형태로만 파싱하면 되게 한다.
+    """
+    first = exc.errors()[0] if exc.errors() else {}
+    field = ".".join(str(p) for p in first.get("loc", ()) if p != "body")
+    message = first.get("msg", "요청 형식이 올바르지 않습니다")
+    logger.warning(
+        "요청 검증 실패: %s %s - %s: %s",
+        request.method,
+        request.url.path,
+        field or "(본문)",
+        message,
+    )
+    error_response = ErrorResponse(
+        error=ErrorDetail(
+            code="VALIDATION_ERROR",
+            message=f"{field}: {message}" if field else message,
+        )
+    )
+    return UnicodeJSONResponse(status_code=422, content=error_response.model_dump())
 
 
 @app.exception_handler(Exception)
@@ -169,9 +176,17 @@ async def api_key_auth_middleware(request: Request, call_next):
 
     X-API-Key 헤더의 값을 환경변수 API_KEY와 비교하여 인증한다.
     API_KEY가 설정되지 않은 경우 인증을 건너뛴다.
+
+    CORS preflight(OPTIONS)는 인증에서 제외한다 — 브라우저는 preflight 에
+    커스텀 헤더를 실어 보내지 않으므로, 인증을 걸면 X-API-Key 를 가진
+    정상 클라이언트도 실제 요청을 보내지 못한다(실측: preflight 401).
     """
     # API_KEY 미설정 시 인증 건너뜀
     if not API_KEY:
+        return await call_next(request)
+
+    # CORS preflight 는 본 요청 전 협상 단계다 — 여기서 막으면 CORS 가 깨진다
+    if request.method == "OPTIONS":
         return await call_next(request)
 
     # 공개 경로는 인증 건너뜀
@@ -188,7 +203,8 @@ async def api_key_auth_middleware(request: Request, call_next):
         )
         return UnicodeJSONResponse(status_code=401, content=error_response.model_dump())
 
-    if request_api_key != API_KEY:
+    # 타이밍 공격 방지를 위해 상수 시간 비교를 쓴다
+    if not secrets.compare_digest(request_api_key, API_KEY):
         logger.warning("유효하지 않은 API 키: %s %s", request.method, request.url.path)
         error_response = ErrorResponse(
             error=ErrorDetail(
@@ -198,6 +214,21 @@ async def api_key_auth_middleware(request: Request, call_next):
         return UnicodeJSONResponse(status_code=401, content=error_response.model_dump())
 
     return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# CORS 미들웨어 (Obsidian 플러그인 등 cross-origin 요청 허용)
+# ---------------------------------------------------------------------------
+# 인증 미들웨어보다 **뒤에** 등록해야 한다. Starlette 은 나중에 등록한 미들웨어를
+# 더 바깥(먼저 실행)에 놓으므로, 이 순서가 CORS → 인증이 된다. 반대로 두면
+# preflight(OPTIONS)가 인증에 막혀 401 이 나가고 CORS 헤더도 붙지 않는다.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ---------------------------------------------------------------------------

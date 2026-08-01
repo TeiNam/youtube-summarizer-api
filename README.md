@@ -139,8 +139,30 @@ docker exec youtube-summarizer-api aws sts get-caller-identity  # 컨테이너 �
 | `ROOT_PATH` | Swagger UI 경로 보정용 root_path | △ |
 | `BEDROCK_MODEL_ID` | Bedrock 모델 ID (요약 품질 향상 시 `anthropic.claude-opus-4-8` 권장) | O |
 | `BEDROCK_EFFORT` | 추론 강도 `low\|medium\|high\|max` (Opus 4.8/4.6·Sonnet 4.6 전용, Haiku는 비워둘 것) | △ |
+| `BEDROCK_MAX_INPUT_CHARS` | 모델에 보낼 자막 길이 상한 (기본 200000) | △ |
 | `TRANSCRIBE_S3_BUCKET` | 음성 인식용 S3 버킷명 | △ |
+| `TRANSCRIBE_MAX_DURATION` | 음성 인식할 영상 길이 상한(초, 기본 7200). 라이브는 항상 거부 | △ |
+| `TRANSCRIBE_DOWNLOAD_WORKERS` | 오디오 다운로드 전용 스레드 수 (기본 2) | △ |
+| `MAX_CONCURRENT_PIPELINES` | 동시 처리 파이프라인 수 (기본 4) | △ |
+| `TASK_TTL_SECONDS` | 완료·실패 작업 보관 시간(초, 기본 3600) | △ |
+| `TASK_MAX_ENTRIES` | 작업 개수 상한 (기본 1000) | △ |
 | `HOST_STATE_DIR` | (compose 전용, `.env` 아님) 인증서 마운트 원본 디렉터리 | O |
+
+지원 `target_language`: `ko` `en` `ja` `zh` `es` `fr` `de` `ru` `pt` `it` `vi` `th` `id` `hi` `ar`.
+목록 밖의 값은 422(`VALIDATION_ERROR`)로 거부합니다 — 자유 문자열을 프롬프트에 넣으면
+모델에 지시를 실을 수 있어 허용 목록으로 묶었습니다.
+
+### 작업 상태 보관 (인메모리)
+
+작업은 프로세스 메모리에만 있습니다. 세 가지 결과가 따라옵니다:
+
+- 재시작하면 진행 중인 작업이 유실됩니다(202를 이미 받은 요청도 사라집니다).
+- 완료·실패 작업은 `TASK_TTL_SECONDS` 이후 조회할 수 없습니다(그 전에 받아가야 합니다).
+- **워커는 1개여야 합니다.** 여러 워커를 띄우면 작업을 만든 워커와 조회하는 워커가 달라
+  404가 납니다. `Dockerfile`의 `--workers 1`이 이것 때문입니다.
+
+영속성이나 워커 확장이 필요해지면 Redis로 옮기면 됩니다 — `TaskManager` 인터페이스는
+그대로 두고 구현만 바꾸는 범위입니다.
 
 `AWS_ACCESS_KEY_ID`·`AWS_SECRET_ACCESS_KEY` 는 더 이상 쓰지 않습니다. 값이 남아 있으면
 `get_aws_client()` 가 그 키를 우선 사용해 프로파일이 무시되므로, 이관 후에는 지워야 합니다.

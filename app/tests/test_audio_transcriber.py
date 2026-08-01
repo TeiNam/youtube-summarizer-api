@@ -3,14 +3,13 @@
 오디오 다운로드 실패, Transcribe 실패, 전체 성공 시나리오를 모킹하여 테스트한다.
 """
 
-import json
-import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.services.audio_transcriber import (
     _download_audio,
+    _reject_live_or_too_long,
     _start_transcription_job,
     _upload_to_s3,
     _wait_for_transcription,
@@ -73,7 +72,7 @@ class TestTranscribeFailure:
 
     def test_start_transcription_job_raises_on_boto3_error(self) -> None:
         """Transcribe 작업 시작 시 boto3 오류가 발생하면 RuntimeError를 발생시켜야 한다."""
-        with patch("app.services.audio_transcriber.boto3.client") as mock_boto:
+        with patch("app.services.audio_transcriber.get_aws_client") as mock_boto:
             mock_client = MagicMock()
             mock_client.start_transcription_job.side_effect = Exception(
                 "AWS 인증 오류"
@@ -85,9 +84,10 @@ class TestTranscribeFailure:
                     "test-job", "s3://bucket/audio/test.mp3"
                 )
 
-    def test_wait_for_transcription_raises_on_failed_status(self) -> None:
+    @pytest.mark.asyncio
+    async def test_wait_for_transcription_raises_on_failed_status(self) -> None:
         """Transcribe 작업 상태가 FAILED이면 RuntimeError를 발생시켜야 한다."""
-        with patch("app.services.audio_transcriber.boto3.client") as mock_boto:
+        with patch("app.services.audio_transcriber.get_aws_client") as mock_boto:
             mock_client = MagicMock()
             mock_client.get_transcription_job.return_value = {
                 "TranscriptionJob": {
@@ -98,15 +98,15 @@ class TestTranscribeFailure:
             mock_boto.return_value = mock_client
 
             with pytest.raises(RuntimeError, match="Transcribe 작업 실패"):
-                _wait_for_transcription("test-job")
+                await _wait_for_transcription("test-job")
 
-    def test_wait_for_transcription_raises_on_timeout(self) -> None:
+    @pytest.mark.asyncio
+    async def test_wait_for_transcription_raises_on_timeout(self) -> None:
         """Transcribe 작업이 타임아웃되면 RuntimeError를 발생시켜야 한다."""
         with (
-            patch("app.services.audio_transcriber.boto3.client") as mock_boto,
-            patch("app.services.audio_transcriber.time.sleep"),
-            patch("app.services.audio_transcriber.MAX_WAIT_TIME", 10),
-            patch("app.services.audio_transcriber.POLL_INTERVAL", 5),
+            patch("app.services.audio_transcriber.get_aws_client") as mock_boto,
+            patch("app.services.audio_transcriber.MAX_WAIT_TIME", 0.05),
+            patch("app.services.audio_transcriber.POLL_INTERVAL", 0.01),
         ):
             mock_client = MagicMock()
             # 계속 IN_PROGRESS 상태를 반환하여 타임아웃 유도
@@ -118,25 +118,53 @@ class TestTranscribeFailure:
             mock_boto.return_value = mock_client
 
             with pytest.raises(RuntimeError, match="Transcribe 작업 타임아웃"):
-                _wait_for_transcription("test-job")
+                await _wait_for_transcription("test-job")
+
+    @pytest.mark.asyncio
+    async def test_wait_for_transcription_honors_wall_clock_deadline(self) -> None:
+        """AWS 호출이 느려도 MAX_WAIT_TIME 을 실제 상한으로 지켜야 한다.
+
+        경과 시간을 POLL_INTERVAL 누적으로 세면 AWS 호출에 걸린 시간이 빠져
+        상한을 한참 넘겨 대기한다(수정 전 동작). 벽시계 기준이면 넘지 않는다.
+        """
+        import time as _time
+
+        with (
+            patch("app.services.audio_transcriber.get_aws_client") as mock_boto,
+            patch("app.services.audio_transcriber.MAX_WAIT_TIME", 0.2),
+            patch("app.services.audio_transcriber.POLL_INTERVAL", 0.01),
+        ):
+            mock_client = MagicMock()
+
+            def slow_poll(**_kwargs):
+                # 폴링 간격(0.01s)보다 훨씬 오래 걸리는 AWS 호출을 흉내낸다
+                _time.sleep(0.05)
+                return {"TranscriptionJob": {"TranscriptionJobStatus": "IN_PROGRESS"}}
+
+            mock_client.get_transcription_job.side_effect = slow_poll
+            mock_boto.return_value = mock_client
+
+            started = _time.monotonic()
+            with pytest.raises(RuntimeError, match="Transcribe 작업 타임아웃"):
+                await _wait_for_transcription("test-job")
+            elapsed = _time.monotonic() - started
+
+        # 상한 0.2s 를 크게 넘기지 않아야 한다 (마지막 폴링 1회분 여유만 허용)
+        assert elapsed < 0.6, f"상한을 넘겨 대기함: {elapsed:.2f}s"
 
     @pytest.mark.asyncio
     async def test_transcribe_audio_raises_on_transcribe_failure(self) -> None:
         """transcribe_audio에서 Transcribe 실패 시 RuntimeError가 전파되어야 한다."""
         with (
             patch(
-                "app.services.audio_transcriber._download_audio",
-                return_value="/tmp/test.mp3",
-            ),
-            patch(
-                "app.services.audio_transcriber._upload_to_s3",
+                "app.services.audio_transcriber._download_and_upload_sync",
                 return_value="s3://bucket/audio/test.mp3",
             ),
             patch(
                 "app.services.audio_transcriber._start_transcription_job",
                 side_effect=RuntimeError("Transcribe 작업 시작 실패: AWS 오류"),
             ),
-            patch("app.services.audio_transcriber.os.path.exists", return_value=False),
+            patch("app.services.audio_transcriber._delete_from_s3"),
         ):
             with pytest.raises(RuntimeError, match="Transcribe 작업 시작 실패"):
                 await transcribe_audio("test_vid")
@@ -157,33 +185,65 @@ class TestTranscribeAudioSuccess:
 
         with (
             patch(
-                "app.services.audio_transcriber._download_audio",
-                return_value="/tmp/test-audio.mp3",
-            ) as mock_download,
-            patch(
-                "app.services.audio_transcriber._upload_to_s3",
+                "app.services.audio_transcriber._download_and_upload_sync",
                 return_value="s3://bucket/audio/test.mp3",
-            ) as mock_upload,
+            ) as mock_prepare,
             patch(
                 "app.services.audio_transcriber._start_transcription_job",
             ) as mock_start,
             patch(
                 "app.services.audio_transcriber._wait_for_transcription",
+                new_callable=AsyncMock,
                 return_value=expected_text,
             ) as mock_wait,
-            patch("app.services.audio_transcriber.os.path.exists", return_value=False),
+            patch("app.services.audio_transcriber._delete_from_s3") as mock_delete,
         ):
             result = await transcribe_audio("test_vid_id")
 
         assert result == expected_text
-        mock_download.assert_called_once()
-        mock_upload.assert_called_once()
+        mock_prepare.assert_called_once()
         mock_start.assert_called_once()
         mock_wait.assert_called_once()
+        # 업로드한 오디오는 성공 후에도 삭제되어야 한다 (S3 무한 누적 방지)
+        mock_delete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_uploaded_audio_deleted_on_failure(self) -> None:
+        """Transcribe 실패 시에도 업로드한 S3 오디오를 삭제해야 한다."""
+        with (
+            patch(
+                "app.services.audio_transcriber._download_and_upload_sync",
+                return_value="s3://bucket/audio/test.mp3",
+            ),
+            patch(
+                "app.services.audio_transcriber._start_transcription_job",
+                side_effect=RuntimeError("Transcribe 작업 시작 실패: AWS 오류"),
+            ),
+            patch("app.services.audio_transcriber._delete_from_s3") as mock_delete,
+        ):
+            with pytest.raises(RuntimeError, match="Transcribe 작업 시작 실패"):
+                await transcribe_audio("test_vid")
+
+        mock_delete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_s3_delete_when_upload_never_happened(self) -> None:
+        """다운로드 단계에서 실패하면 S3 삭제를 시도하지 않아야 한다."""
+        with (
+            patch(
+                "app.services.audio_transcriber._download_and_upload_sync",
+                side_effect=RuntimeError("오디오 다운로드 실패: 네트워크 오류"),
+            ),
+            patch("app.services.audio_transcriber._delete_from_s3") as mock_delete,
+        ):
+            with pytest.raises(RuntimeError, match="오디오 다운로드 실패"):
+                await transcribe_audio("test_vid")
+
+        mock_delete.assert_not_called()
 
     def test_upload_to_s3_success(self) -> None:
         """S3 업로드 성공 시 S3 URI를 반환해야 한다."""
-        with patch("app.services.audio_transcriber.boto3.client") as mock_boto, \
+        with patch("app.services.audio_transcriber.get_aws_client") as mock_boto, \
              patch("app.services.audio_transcriber.S3_BUCKET_NAME", "youtube-summary-audio"):
             mock_client = MagicMock()
             mock_boto.return_value = mock_client
@@ -197,7 +257,7 @@ class TestTranscribeAudioSuccess:
 
     def test_upload_to_s3_failure(self) -> None:
         """S3 업로드 실패 시 RuntimeError를 발생시켜야 한다."""
-        with patch("app.services.audio_transcriber.boto3.client") as mock_boto:
+        with patch("app.services.audio_transcriber.get_aws_client") as mock_boto:
             mock_client = MagicMock()
             mock_client.upload_file.side_effect = Exception("S3 접근 거부")
             mock_boto.return_value = mock_client
@@ -205,12 +265,13 @@ class TestTranscribeAudioSuccess:
             with pytest.raises(RuntimeError, match="S3 업로드 실패"):
                 _upload_to_s3("/tmp/test.mp3", "audio/test.mp3")
 
-    def test_wait_for_transcription_success(self) -> None:
+    @pytest.mark.asyncio
+    async def test_wait_for_transcription_success(self) -> None:
         """Transcribe 작업 완료 시 텍스트를 반환해야 한다."""
         transcript_text = "테스트 음성 인식 결과"
 
         with (
-            patch("app.services.audio_transcriber.boto3.client") as mock_boto,
+            patch("app.services.audio_transcriber.get_aws_client") as mock_boto,
             patch(
                 "app.services.audio_transcriber._fetch_transcript_text",
                 return_value=transcript_text,
@@ -227,6 +288,32 @@ class TestTranscribeAudioSuccess:
             }
             mock_boto.return_value = mock_client
 
-            result = _wait_for_transcription("test-job")
+            result = await _wait_for_transcription("test-job")
 
         assert result == transcript_text
+
+
+# =============================================================================
+# 다운로드 가드 (라이브·길이 상한)
+# =============================================================================
+
+
+class TestDownloadGuards:
+    """yt-dlp match_filter 가 라이브·과도한 길이를 거르는지 검증"""
+
+    def test_live_stream_rejected(self) -> None:
+        """라이브 스트림은 거부되어야 한다 (다운로드가 끝나지 않는다)."""
+        assert _reject_live_or_too_long({"is_live": True}) is not None
+        assert _reject_live_or_too_long({"live_status": "is_live"}) is not None
+
+    def test_too_long_video_rejected(self) -> None:
+        """길이 상한을 넘는 영상은 거부되어야 한다."""
+        with patch("app.services.audio_transcriber.MAX_AUDIO_DURATION", 600):
+            assert _reject_live_or_too_long({"duration": 601}) is not None
+
+    def test_normal_video_passes(self) -> None:
+        """상한 이내의 일반 영상은 통과해야 한다."""
+        with patch("app.services.audio_transcriber.MAX_AUDIO_DURATION", 600):
+            assert _reject_live_or_too_long({"duration": 300}) is None
+        # duration 을 알 수 없어도 통과시킨다 (yt-dlp 가 못 읽는 경우)
+        assert _reject_live_or_too_long({}) is None
