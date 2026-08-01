@@ -11,6 +11,7 @@ ponytail: 단일 컨테이너 배포라 인메모리로 충분하다. 프로세�
 영속성·워커 확장이 필요해지면 Redis 로 옮긴다 — 인터페이스는 그대로 두면 된다.
 """
 
+import logging
 import os
 import threading
 import time
@@ -18,6 +19,8 @@ import uuid
 from typing import Optional
 
 from app.models.responses import TaskStatus
+
+logger = logging.getLogger(__name__)
 
 # 완료·실패 작업을 보관하는 시간(초). 조회는 그 안에 하면 된다.
 TASK_TTL_SECONDS = int(os.environ.get("TASK_TTL_SECONDS", "3600"))
@@ -131,8 +134,7 @@ class TaskManager:
         if len(self._tasks) <= MAX_TASKS:
             return
 
-        # 상한 초과 — 종료된 작업부터 오래된 순으로 버린다.
-        # 진행 중인 작업을 버리면 응답할 수 없게 되므로 마지막 수단으로만 건드린다.
+        # 상한 초과 — 종료된 작업만 오래된 순으로 버린다.
         finished = sorted(
             (t for t in self._tasks.values() if t["finished_at"] is not None),
             key=lambda t: t["finished_at"],
@@ -142,9 +144,14 @@ class TaskManager:
                 return
             del self._tasks[task["task_id"]]
 
-        # 종료 작업을 다 버려도 상한을 넘으면 진행 중 작업 중 가장 오래된 것을 버린다
-        running = sorted(self._tasks.values(), key=lambda t: t["created_at"])
-        for task in running:
-            if len(self._tasks) <= MAX_TASKS:
-                return
-            del self._tasks[task["task_id"]]
+        # 진행 중인 작업은 절대 버리지 않는다. 버리면 파이프라인은 계속 도는데
+        # update_status 가 무시되고 조회는 영구 404 가 된다 — 사용자는 202 를 받고도
+        # 결과를 영원히 못 받는다. 상한을 넘긴 채로 두고 경고만 남긴다
+        # (동시 실행은 MAX_CONCURRENT_PIPELINES 가 이미 제한하므로 무한히 늘지 않는다).
+        if len(self._tasks) > MAX_TASKS:
+            logger.warning(
+                "진행 중인 작업이 많아 상한(%d)을 넘겼습니다: 현재 %d건. "
+                "MAX_CONCURRENT_PIPELINES 또는 TASK_MAX_ENTRIES 를 확인하세요.",
+                MAX_TASKS,
+                len(self._tasks),
+            )

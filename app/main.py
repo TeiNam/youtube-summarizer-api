@@ -60,6 +60,10 @@ setup_logging()
 
 logger = logging.getLogger(__name__)
 
+# CORS 허용 오리진. 미들웨어와 예외 핸들러가 같은 값을 써야 한다 —
+# 아래 general_exception_handler 주석 참고.
+CORS_ALLOW_ORIGIN = "*"
+
 # 서브 경로 프리픽스 (예: /yts/api)
 API_PREFIX = os.environ.get("API_PREFIX", "")
 # 리버스 프록시 root_path (Swagger UI 등에서 올바른 경로 표시용)
@@ -135,6 +139,11 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
 
     처리되지 않은 모든 예외를 캡처하여 500 상태 코드와
     ErrorResponse 형식으로 응답하고, 스택 트레이스를 로깅한다.
+
+    CORS 헤더를 직접 붙인다. 이 핸들러는 Starlette 의 ServerErrorMiddleware 에서
+    실행되는데 그건 사용자 미들웨어 **전부보다 바깥**이라 CORSMiddleware 를 최외곽에
+    등록해도 이 응답은 거치지 않는다(실측: allow-origin 없음). 헤더가 없으면
+    브라우저가 본문을 못 읽어 원인 불명 실패로 보인다.
     """
     logger.error(
         "예상치 못한 오류 발생: %s %s - %s",
@@ -149,7 +158,11 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
             message="내부 서버 오류가 발생했습니다",
         )
     )
-    return UnicodeJSONResponse(status_code=500, content=error_response.model_dump())
+    return UnicodeJSONResponse(
+        status_code=500,
+        content=error_response.model_dump(),
+        headers={"Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +216,12 @@ async def api_key_auth_middleware(request: Request, call_next):
         )
         return UnicodeJSONResponse(status_code=401, content=error_response.model_dump())
 
-    # 타이밍 공격 방지를 위해 상수 시간 비교를 쓴다
-    if not secrets.compare_digest(request_api_key, API_KEY):
+    # 타이밍 공격 방지를 위해 상수 시간 비교를 쓴다.
+    # bytes 로 비교한다 — compare_digest 는 비ASCII str 에 TypeError 를 내고,
+    # 그러면 인증 실패가 500 으로 바뀐다(한글 키나 헤더가 오면 실제로 발생).
+    if not secrets.compare_digest(
+        request_api_key.encode("utf-8"), API_KEY.encode("utf-8")
+    ):
         logger.warning("유효하지 않은 API 키: %s %s", request.method, request.url.path)
         error_response = ErrorResponse(
             error=ErrorDetail(
@@ -214,21 +231,6 @@ async def api_key_auth_middleware(request: Request, call_next):
         return UnicodeJSONResponse(status_code=401, content=error_response.model_dump())
 
     return await call_next(request)
-
-
-# ---------------------------------------------------------------------------
-# CORS 미들웨어 (Obsidian 플러그인 등 cross-origin 요청 허용)
-# ---------------------------------------------------------------------------
-# 인증 미들웨어보다 **뒤에** 등록해야 한다. Starlette 은 나중에 등록한 미들웨어를
-# 더 바깥(먼저 실행)에 놓으므로, 이 순서가 CORS → 인증이 된다. 반대로 두면
-# preflight(OPTIONS)가 인증에 막혀 401 이 나가고 CORS 헤더도 붙지 않는다.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +269,23 @@ async def request_response_logging_middleware(request: Request, call_next):
     )
 
     return response
+
+
+# ---------------------------------------------------------------------------
+# CORS 미들웨어 (Obsidian 플러그인 등 cross-origin 요청 허용)
+# ---------------------------------------------------------------------------
+# **가장 마지막에 등록한다.** Starlette 은 나중에 등록한 미들웨어를 더 바깥에 두므로
+# 이게 최외곽이 되어 모든 응답에 CORS 헤더가 붙는다. 두 가지가 여기에 걸려 있다:
+#   1) 인증보다 바깥이어야 preflight(OPTIONS)가 401 에 막히지 않는다.
+#   2) 예외 핸들러가 만든 500 응답에도 헤더가 붙는다 — 안쪽에 두면 미처리 예외 응답에
+#      CORS 헤더가 없어서 브라우저가 본문을 못 읽고 원인 불명 실패로 보인다(실측).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[CORS_ALLOW_ORIGIN],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # API 라우터 등록 (프리픽스 적용)

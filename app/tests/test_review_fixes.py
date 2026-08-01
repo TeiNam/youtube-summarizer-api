@@ -3,12 +3,14 @@
 각 테스트는 수정 전 코드에서 실패한다 — 무엇을 고쳤는지 고정하는 것이 목적이다.
 """
 
+import asyncio
 import io
 import json
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
 from app.api.routes import task_manager
@@ -73,6 +75,28 @@ class TestCorsPreflightNotBlockedByAuth:
         )
         assert response.status_code == 401
         assert response.headers.get("access-control-allow-origin") == "*"
+
+    def test_unhandled_error_response_carries_cors_headers(self) -> None:
+        """미처리 예외로 만든 500 에도 CORS 헤더가 붙어야 한다.
+
+        CORS 가 최외곽이 아니면 500 응답에 헤더가 빠져, 브라우저가 본문을 읽지 못하고
+        원인 불명 실패로 보인다(2차 리뷰에서 잡힌 결함).
+        """
+        client = TestClient(app, raise_server_exceptions=False)
+        with patch(
+            "app.api.routes.task_manager.get_task", side_effect=RuntimeError("펑")
+        ):
+            response = client.get(
+                f"{PREFIX}/tasks/abc", headers={**AUTH_HEADERS, **ORIGIN_HEADERS}
+            )
+
+        assert response.status_code == 500
+        assert response.headers.get("access-control-allow-origin") == "*"
+
+    def test_cors_is_outermost_middleware(self) -> None:
+        """CORS 가 미들웨어 스택의 최외곽이어야 한다 (등록 순서 회귀 방지)."""
+        # Starlette 은 나중에 등록한 미들웨어를 더 바깥에 둔다 → 목록의 첫 항목이 최외곽
+        assert app.user_middleware[0].cls is CORSMiddleware
 
 
 # =============================================================================
@@ -266,6 +290,9 @@ class TestUrlHostValidation:
             "https://www.youtube.com/embed/dQw4w9WgXcQ",
             "https://www.youtube.com/live/dQw4w9WgXcQ",
             "https://www.youtube.com/watch?t=30&v=dQw4w9WgXcQ",
+            # 프로토콜 상대 URL — 수정 전 정규식은 받아들였다(2차 리뷰에서 잡힌 회귀)
+            "//www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "//youtu.be/dQw4w9WgXcQ",
         ],
     )
     def test_accepts_real_youtube_urls(self, url: str) -> None:
@@ -374,6 +401,25 @@ class TestTaskManagerEviction:
             assert manager.get_task(finished[0]) is None
             assert manager.get_task(running) is not None
 
+    def test_running_tasks_never_evicted_by_max_entries(self) -> None:
+        """상한을 넘겨도 진행 중인 작업은 버리지 않아야 한다.
+
+        버리면 파이프라인은 계속 도는데 update_status 가 무시되고 조회는 영구 404 가
+        된다 — 202 를 받은 사용자가 결과를 영원히 못 받는다(2차 리뷰에서 잡힌 결함).
+        """
+        manager = TaskManager()
+        with patch("app.services.task_manager.MAX_TASKS", 3):
+            ids = []
+            for _ in range(5):  # 상한보다 많이, 전부 진행 중
+                tid = manager.create_task("https://youtu.be/x", "ko")
+                manager.update_status(tid, TaskStatus.SUMMARIZING)
+                ids.append(tid)
+                time.sleep(0.001)
+
+            alive = [i for i in ids if manager.get_task(i) is not None]
+
+        assert len(alive) == 5, "진행 중인 작업이 조용히 사라졌다"
+
     def test_get_task_returns_copy(self) -> None:
         """조회 결과를 고쳐도 내부 상태가 바뀌지 않아야 한다."""
         manager = TaskManager()
@@ -432,6 +478,143 @@ class TestApiKeyComparison:
         )
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "INVALID_API_KEY"
+
+    @pytest.mark.asyncio
+    async def test_non_ascii_configured_key_returns_401_not_500(self) -> None:
+        """서버 키가 비ASCII 일 때 인증 실패가 500 이 아니라 401 이어야 한다.
+
+        compare_digest 는 비ASCII str 에 TypeError 를 내므로 bytes 로 비교해야 한다.
+        환경변수 API_KEY 에 한글을 넣는 것은 실제로 가능하고, 그러면 **모든 요청이**
+        인증 실패 대신 500 이 된다(2차 리뷰에서 잡힌 결함).
+
+        참고: HTTP 헤더는 latin-1 이라 한글 키를 헤더로 보낼 수는 없다. 즉 서버 키가
+        한글이면 인증 성공은 애초에 불가능하고, 문제는 '조용한 401' 이어야 할 것이
+        '500' 이 되는 것뿐이다. 그래서 실패 경로만 검증한다.
+        """
+        import app.main as main_module
+        from starlette.requests import Request
+
+        async def _never_called(_request):  # pragma: no cover - 인증에서 막힌다
+            raise AssertionError("인증을 통과해서는 안 된다")
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": f"{PREFIX}/tasks/x",
+                "headers": [(b"x-api-key", b"some-ascii-key")],
+                "query_string": b"",
+            }
+        )
+
+        with patch.object(main_module, "API_KEY", "비밀키-한글"):
+            response = await main_module.api_key_auth_middleware(
+                request, _never_called
+            )
+
+        assert response.status_code == 401
+        assert json.loads(response.body)["error"]["code"] == "INVALID_API_KEY"
+
+    def test_compare_digest_str_form_would_crash(self) -> None:
+        """수정 전 방식(str 비교)이 왜 깨지는지 고정한다."""
+        import secrets
+
+        with pytest.raises(TypeError):
+            secrets.compare_digest("한글키", "한글키")
+
+        # bytes 비교는 정상 동작한다 (미들웨어가 쓰는 방식)
+        assert secrets.compare_digest("한글키".encode(), "한글키".encode())
+        assert not secrets.compare_digest("한글키".encode(), "다른키".encode())
+
+
+# =============================================================================
+# 2차 리뷰: 세마포어가 이벤트 루프에 묶이는 문제
+# =============================================================================
+
+
+class TestSemaphorePerEventLoop:
+    """모듈 전역 세마포어를 재사용하면 다른 루프에서 못 쓴다."""
+
+    def test_works_across_separate_event_loops(self) -> None:
+        """루프를 새로 만들어 돌려도 작업이 완료되어야 한다.
+
+        단일 전역 세마포어면 두 번째 루프에서 'bound to a different event loop' 로
+        작업이 PENDING 에 갇힌다(2차 리뷰에서 잡힌 결함).
+        """
+        from unittest.mock import AsyncMock
+
+        from app.services import pipeline as pl
+
+        sufficient = "충분히 긴 자막 텍스트다. " * 200
+
+        async def run_once() -> str:
+            manager = TaskManager()
+            task_id = manager.create_task("https://youtu.be/x", "ko")
+            with (
+                patch.object(
+                    pl,
+                    "fetch_video_metadata",
+                    AsyncMock(return_value=("제목", 600, "2026-01-01")),
+                ),
+                patch.object(
+                    pl,
+                    "extract_subtitles_with_language",
+                    AsyncMock(return_value=(sufficient, "en")),
+                ),
+                patch.object(pl, "translate_text", AsyncMock(return_value="번역문")),
+                patch.object(
+                    pl,
+                    "summarize_text",
+                    AsyncMock(return_value={"summary": "s", "key_points": ["a"]}),
+                ),
+            ):
+                await pl.process_summary(task_id, "vid", "ko", manager)
+            return manager.get_task(task_id)["status"]
+
+        # 서로 다른 루프에서 두 번 실행한다 (asyncio.run 은 매번 새 루프를 만든다)
+        assert asyncio.run(run_once()) == TaskStatus.COMPLETED
+        assert asyncio.run(run_once()) == TaskStatus.COMPLETED
+
+
+# =============================================================================
+# 2차 리뷰: 취소 시 S3 오디오 정리
+# =============================================================================
+
+
+class TestS3CleanupOnCancel:
+    """await 가 취소돼도 워커 스레드는 업로드를 마친다."""
+
+    @pytest.mark.asyncio
+    async def test_deletes_uploaded_audio_when_cancelled(self) -> None:
+        """취소되어도 업로드된 오디오를 삭제해야 한다.
+
+        반환값에만 의존하면(uploaded = True 가 실행되지 않아) 객체가 고아가 된다
+        (2차 리뷰에서 잡힌 결함).
+        """
+        from app.services import audio_transcriber as at
+
+        upload_started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def fake_prepare(video_id, job_name, s3_key, uploaded_keys):
+            # 업로드를 시도했다고 표시한 뒤, 취소가 끼어들 시간을 준다
+            uploaded_keys.add(s3_key)
+            loop.call_soon_threadsafe(upload_started.set)
+            time.sleep(0.2)
+            return f"s3://bucket/{s3_key}"
+
+        with (
+            patch.object(at, "_download_and_upload_sync", fake_prepare),
+            patch.object(at, "_start_transcription_job"),
+            patch.object(at, "_delete_from_s3") as mock_delete,
+        ):
+            task = asyncio.create_task(at.transcribe_audio("test_vid"))
+            await upload_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        mock_delete.assert_called_once()
 
 
 # =============================================================================

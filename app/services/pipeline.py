@@ -42,17 +42,23 @@ PIPELINE_FAILED_MESSAGE = "요약 처리 중 오류가 발생했습니다. 잠�
 # 함께 튀고, 스레드풀도 고갈된다. 대기는 세마포어에서 순서를 기다리는 형태가 된다.
 MAX_CONCURRENT_PIPELINES = int(os.environ.get("MAX_CONCURRENT_PIPELINES", "4"))
 
-# 이벤트 루프별 세마포어. BackgroundTasks 는 요청을 처리한 루프에서 돌지만,
-# 모듈 임포트 시점에는 루프가 없어 첫 사용 시점에 만든다.
-_semaphore: asyncio.Semaphore | None = None
+# 세마포어는 만들어진 이벤트 루프에 묶인다. 모듈 임포트 시점에는 루프가 없으므로
+# 첫 사용 시점에 만들고, 루프별로 따로 보관한다 — 단일 객체를 재사용하면 테스트나
+# 멀티 루프 환경에서 'bound to a different event loop' 로 작업이 PENDING 에 갇힌다.
+_semaphores: "dict[asyncio.AbstractEventLoop, asyncio.Semaphore]" = {}
 
 
 def _get_semaphore() -> asyncio.Semaphore:
-    """동시 실행 제한 세마포어를 반환한다 (첫 호출 시 생성)."""
-    global _semaphore
-    if _semaphore is None:
-        _semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
-    return _semaphore
+    """현재 이벤트 루프의 동시 실행 제한 세마포어를 반환한다."""
+    loop = asyncio.get_running_loop()
+    semaphore = _semaphores.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
+        _semaphores[loop] = semaphore
+        # 닫힌 루프의 항목이 쌓이지 않게 정리한다
+        for stale in [lp for lp in _semaphores if lp.is_closed()]:
+            del _semaphores[stale]
+    return semaphore
 
 
 async def process_summary(

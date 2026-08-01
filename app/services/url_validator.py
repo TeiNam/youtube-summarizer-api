@@ -58,8 +58,11 @@ def validate_youtube_url(url: str) -> str:
 
     raw = url.strip()
 
+    # 프로토콜 상대 URL(//www.youtube.com/...)에는 https 를 붙인다
+    if raw.startswith("//"):
+        raw = f"https:{raw}"
     # 스킴 없는 입력(youtube.com/watch?v=...)도 받아준다
-    if "//" not in raw.split("?", 1)[0]:
+    elif "//" not in raw.split("?", 1)[0]:
         raw = f"https://{raw}"
 
     parts = urlsplit(raw)

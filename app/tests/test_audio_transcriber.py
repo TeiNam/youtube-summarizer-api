@@ -175,6 +175,16 @@ class TestTranscribeFailure:
 # =============================================================================
 
 
+def _fake_prepare(video_id, job_name, s3_key, uploaded_keys):
+    """_download_and_upload_sync 대역 — 업로드 키를 실제 구현처럼 기록한다.
+
+    호출자는 반환값이 아니라 uploaded_keys 를 보고 S3 정리를 결정한다
+    (취소 시에도 삭제가 누락되지 않게 하기 위한 구조).
+    """
+    uploaded_keys.add(s3_key)
+    return f"s3://bucket/{s3_key}"
+
+
 class TestTranscribeAudioSuccess:
     """전체 음성 인식 파이프라인 성공 테스트 (모킹 활용)"""
 
@@ -186,7 +196,7 @@ class TestTranscribeAudioSuccess:
         with (
             patch(
                 "app.services.audio_transcriber._download_and_upload_sync",
-                return_value="s3://bucket/audio/test.mp3",
+                side_effect=_fake_prepare,
             ) as mock_prepare,
             patch(
                 "app.services.audio_transcriber._start_transcription_job",
@@ -213,7 +223,7 @@ class TestTranscribeAudioSuccess:
         with (
             patch(
                 "app.services.audio_transcriber._download_and_upload_sync",
-                return_value="s3://bucket/audio/test.mp3",
+                side_effect=_fake_prepare,
             ),
             patch(
                 "app.services.audio_transcriber._start_transcription_job",

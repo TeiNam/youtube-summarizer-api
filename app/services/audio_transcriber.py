@@ -225,18 +225,32 @@ async def _wait_for_transcription(job_name: str) -> str:
     loop = asyncio.get_running_loop()
     deadline = time.monotonic() + MAX_WAIT_TIME
 
-    while time.monotonic() < deadline:
-        _status, transcript_uri = await loop.run_in_executor(
-            None, partial(_poll_transcription_once, job_name)
-        )
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"Transcribe 작업 타임아웃: {MAX_WAIT_TIME}초 초과")
+
+        # 폴링 호출 자체에도 남은 시간을 씌운다 — executor 대기나 느린 AWS 응답으로
+        # 호출 안에서 상한을 넘겨 버리면 벽시계 deadline 이 무의미해진다.
+        try:
+            _status, transcript_uri = await asyncio.wait_for(
+                loop.run_in_executor(None, partial(_poll_transcription_once, job_name)),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"Transcribe 작업 타임아웃: {MAX_WAIT_TIME}초 초과"
+            ) from None
+
         if transcript_uri is not None:
+            # 결과 다운로드는 자체 타임아웃(TRANSCRIPT_FETCH_TIMEOUT)이 있고, 여기까지
+            # 왔으면 작업은 이미 끝났으므로 남은 시간으로 자르지 않는다.
             return await loop.run_in_executor(
                 None, partial(_fetch_transcript_text, transcript_uri)
             )
+
         # 남은 시간보다 길게 자지 않는다
         await asyncio.sleep(min(POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
-
-    raise RuntimeError(f"Transcribe 작업 타임아웃: {MAX_WAIT_TIME}초 초과")
 
 
 def _fetch_transcript_text(transcript_uri: str) -> str:
@@ -281,10 +295,13 @@ def _fetch_transcript_text(transcript_uri: str) -> str:
         raise RuntimeError(f"Transcribe 결과 파싱 실패: {e}") from e
 
 
-def _download_and_upload_sync(video_id: str, job_name: str, s3_key: str) -> str:
+def _download_and_upload_sync(
+    video_id: str, job_name: str, s3_key: str, uploaded_keys: set[str]
+) -> str:
     """오디오를 내려받아 S3 에 올린다 (전용 스레드풀에서 실행).
 
-    임시 디렉터리는 성공·실패 모두 정리한다.
+    임시 디렉터리는 성공·실패 모두 정리한다. 업로드를 시도했으면 uploaded_keys 에
+    키를 넣어 호출자가 정리할 수 있게 한다(취소되어도 삭제가 누락되지 않는다).
 
     Args:
         video_id: 유튜브 비디오 ID
@@ -301,6 +318,9 @@ def _download_and_upload_sync(video_id: str, job_name: str, s3_key: str) -> str:
         audio_file = _download_audio(video_id, output_path)
 
         logger.info("비디오 %s: S3 업로드 시작", video_id)
+        # 업로드 직전에 표시한다 — 호출자가 await 를 취소해도 이 스레드는 계속
+        # 돌아 업로드를 마치므로, 반환값에만 의존하면 취소 시 객체가 고아가 된다.
+        uploaded_keys.add(s3_key)
         return _upload_to_s3(audio_file, s3_key)
     finally:
         # yt-dlp 가 .part·.webm 등 중간 파일을 남기므로 os.rmdir 로는 못 지운다
@@ -327,14 +347,17 @@ async def transcribe_audio(video_id: str) -> str:
     job_name = f"yt-{video_id}-{uuid.uuid4().hex[:8]}"
     s3_key = f"audio-summary/{job_name}.mp3"
     loop = asyncio.get_running_loop()
-    uploaded = False
+    # 업로드를 시도한 키를 워커 스레드가 여기에 넣는다. 반환값 대신 이걸 보는 이유는
+    # await 가 취소돼도 스레드는 업로드를 마치기 때문이다(반환값은 버려진다).
+    uploaded_keys: set[str] = set()
 
     try:
         s3_uri = await loop.run_in_executor(
             _download_executor,
-            partial(_download_and_upload_sync, video_id, job_name, s3_key),
+            partial(
+                _download_and_upload_sync, video_id, job_name, s3_key, uploaded_keys
+            ),
         )
-        uploaded = True
 
         logger.info("비디오 %s: Transcribe 작업 시작", video_id)
         await loop.run_in_executor(
@@ -357,5 +380,9 @@ async def transcribe_audio(video_id: str) -> str:
         )
         raise RuntimeError(f"음성 인식 실패: {e}") from e
     finally:
-        if uploaded:
-            await loop.run_in_executor(None, partial(_delete_from_s3, s3_key))
+        # 취소(CancelledError)로 빠져나갈 때도 여기를 지난다. shield 로 감싸 삭제
+        # 자체가 취소되지 않게 한다 — 안 그러면 취소 시 오디오가 S3 에 남는다.
+        for key in uploaded_keys:
+            await asyncio.shield(
+                loop.run_in_executor(None, partial(_delete_from_s3, key))
+            )
