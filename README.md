@@ -152,6 +152,25 @@ docker exec youtube-summarizer-api aws sts get-caller-identity  # 컨테이너 �
 목록 밖의 값은 422(`VALIDATION_ERROR`)로 거부합니다 — 자유 문자열을 프롬프트에 넣으면
 모델에 지시를 실을 수 있어 허용 목록으로 묶었습니다.
 
+### S3 오디오 정리
+
+자막 없는 영상은 오디오를 `TRANSCRIBE_S3_BUCKET`에 올린 뒤 Transcribe로 넘깁니다. 이
+오디오는 성공·실패 어느 쪽이든 앱이 삭제합니다. 단 **프로세스가 취소·강제 종료되는
+순간에 업로드된 객체는 남습니다** — 그 시점에 삭제를 시도하면 이벤트 루프가 닫히는
+중이라 성공을 보장할 수 없어, 앱은 남은 키를 경고 로그로만 남깁니다.
+
+그래서 버킷에 수명 주기 규칙을 걸어 두는 것을 전제합니다:
+
+```bash
+aws s3api put-bucket-lifecycle-configuration --bucket "$TRANSCRIBE_S3_BUCKET" \
+  --lifecycle-configuration '{"Rules":[{
+    "ID":"expire-transcribe-audio","Status":"Enabled",
+    "Filter":{"Prefix":"audio-summary/"},
+    "Expiration":{"Days":1}}]}'
+```
+
+규칙이 없으면 취소·종료로 남은 mp3가 버킷에 계속 쌓입니다.
+
 ### 작업 상태 보관 (인메모리)
 
 작업은 프로세스 메모리에만 있습니다. 네 가지 결과가 따라옵니다:

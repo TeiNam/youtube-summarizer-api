@@ -14,7 +14,6 @@ from app.services.audio_transcriber import (
     _upload_to_s3,
     _wait_for_transcription,
     transcribe_audio,
-    wait_for_cleanups,
 )
 
 
@@ -159,7 +158,7 @@ class TestTranscribeFailure:
         with (
             patch(
                 "app.services.audio_transcriber._download_and_upload_sync",
-                side_effect=_fake_prepare,
+                return_value="s3://bucket/audio-summary/test.mp3",
             ),
             patch(
                 "app.services.audio_transcriber._start_transcription_job",
@@ -176,16 +175,6 @@ class TestTranscribeFailure:
 # =============================================================================
 
 
-def _fake_prepare(video_id, job_name, s3_key, uploaded_keys):
-    """_download_and_upload_sync 대역 — 업로드 키를 실제 구현처럼 기록한다.
-
-    호출자는 반환값이 아니라 uploaded_keys 를 보고 S3 정리를 결정한다.
-    완료 신호(done)는 _prepare_audio_in_thread 래퍼가 세팅하므로 여기서 다루지 않는다.
-    """
-    uploaded_keys.add(s3_key)
-    return f"s3://bucket/{s3_key}"
-
-
 class TestTranscribeAudioSuccess:
     """전체 음성 인식 파이프라인 성공 테스트 (모킹 활용)"""
 
@@ -197,7 +186,7 @@ class TestTranscribeAudioSuccess:
         with (
             patch(
                 "app.services.audio_transcriber._download_and_upload_sync",
-                side_effect=_fake_prepare,
+                return_value="s3://bucket/audio-summary/test.mp3",
             ) as mock_prepare,
             patch(
                 "app.services.audio_transcriber._start_transcription_job",
@@ -210,7 +199,6 @@ class TestTranscribeAudioSuccess:
             patch("app.services.audio_transcriber._delete_from_s3") as mock_delete,
         ):
             result = await transcribe_audio("test_vid_id")
-            wait_for_cleanups()  # 정리는 별도 스레드에서 돈다
 
         assert result == expected_text
         mock_prepare.assert_called_once()
@@ -225,7 +213,7 @@ class TestTranscribeAudioSuccess:
         with (
             patch(
                 "app.services.audio_transcriber._download_and_upload_sync",
-                side_effect=_fake_prepare,
+                return_value="s3://bucket/audio-summary/test.mp3",
             ),
             patch(
                 "app.services.audio_transcriber._start_transcription_job",
@@ -235,7 +223,6 @@ class TestTranscribeAudioSuccess:
         ):
             with pytest.raises(RuntimeError, match="Transcribe 작업 시작 실패"):
                 await transcribe_audio("test_vid")
-            wait_for_cleanups()  # 정리는 별도 스레드에서 돈다
 
         mock_delete.assert_called_once()
 
@@ -251,7 +238,6 @@ class TestTranscribeAudioSuccess:
         ):
             with pytest.raises(RuntimeError, match="오디오 다운로드 실패"):
                 await transcribe_audio("test_vid")
-            wait_for_cleanups()
 
         mock_delete.assert_not_called()
 

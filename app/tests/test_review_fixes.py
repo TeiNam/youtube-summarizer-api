@@ -699,40 +699,28 @@ class TestS3CleanupOnCancel:
     """await 가 취소돼도 워커 스레드는 업로드를 마친다."""
 
     @pytest.mark.asyncio
-    async def test_deletes_uploaded_audio_when_cancelled(self) -> None:
-        """취소되어도 업로드된 오디오를 삭제해야 한다.
+    async def test_deletes_uploaded_audio_on_failure(self) -> None:
+        """Transcribe 가 실패해도 업로드한 오디오를 삭제해야 한다.
 
-        반환값에만 의존하면(uploaded = True 가 실행되지 않아) 객체가 고아가 된다
-        (2차 리뷰에서 잡힌 결함).
+        삭제가 없으면 요청마다 mp3 가 버킷에 영구 누적된다(1차 리뷰에서 잡힌 결함).
         """
         from app.services import audio_transcriber as at
 
-        upload_started = asyncio.Event()
-        loop = asyncio.get_running_loop()
-
-        def fake_prepare(video_id, job_name, s3_key, uploaded_keys):
-            # 업로드를 시도했다고 표시한 뒤, 취소가 끼어들 시간을 준다
-            uploaded_keys.add(s3_key)
-            loop.call_soon_threadsafe(upload_started.set)
-            time.sleep(0.2)
-            return f"s3://bucket/{s3_key}"
-
-        # 다른 테스트가 남긴 정리 작업을 먼저 비운다 — 안 그러면 이 테스트의
-        # mock_delete 가 그것들까지 세어 호출 횟수가 어긋난다
-        at.wait_for_cleanups()
-
         with (
-            patch.object(at, "_download_and_upload_sync", fake_prepare),
-            patch.object(at, "_start_transcription_job"),
+            patch.object(
+                at,
+                "_download_and_upload_sync",
+                return_value="s3://bucket/audio-summary/test.mp3",
+            ),
+            patch.object(
+                at,
+                "_start_transcription_job",
+                side_effect=RuntimeError("Transcribe 작업 시작 실패"),
+            ),
             patch.object(at, "_delete_from_s3") as mock_delete,
         ):
-            task = asyncio.create_task(at.transcribe_audio("test_vid"))
-            await upload_started.wait()
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            # 정리는 취소를 삼키지 않기 위해 별도 스레드로 넘긴다 — 완료를 기다린다
-            at.wait_for_cleanups()
+            with pytest.raises(RuntimeError, match="Transcribe 작업 시작 실패"):
+                await at.transcribe_audio("test_vid")
 
         mock_delete.assert_called_once()
 
@@ -746,18 +734,16 @@ class TestS3CleanupOnCancel:
         """
         from app.services import audio_transcriber as at
 
-        at.wait_for_cleanups()  # 다른 테스트가 남긴 정리 작업 배제
-
-        def fake_prepare(video_id, job_name, s3_key, uploaded_keys):
-            uploaded_keys.add(s3_key)
-            return f"s3://bucket/{s3_key}"
-
         async def slow_wait(_job_name):
             await asyncio.sleep(0.15)
             return "결과텍스트"
 
         with (
-            patch.object(at, "_download_and_upload_sync", fake_prepare),
+            patch.object(
+                at,
+                "_download_and_upload_sync",
+                return_value="s3://bucket/audio-summary/test.mp3",
+            ),
             patch.object(at, "_start_transcription_job"),
             patch.object(at, "_wait_for_transcription", slow_wait),
             patch.object(at, "_delete_from_s3"),
@@ -769,45 +755,41 @@ class TestS3CleanupOnCancel:
             with pytest.raises(asyncio.CancelledError):
                 await task
             assert task.cancelled(), "취소가 삼켜져 정상 완료로 위장됐다"
-            at.wait_for_cleanups()
 
     @pytest.mark.asyncio
-    async def test_delete_skipped_when_upload_drain_times_out(self) -> None:
-        """업로드 완료를 기다리다 타임아웃하면 삭제를 건너뛰어야 한다.
+    async def test_cancellation_logs_leftover_object(self, caplog) -> None:
+        """취소 시에는 삭제를 시도하지 않고 남은 객체를 로그에 남겨야 한다.
 
-        기다림을 포기하고 바로 삭제하면 삭제가 먼저 나가고 그 뒤 업로드가 완료되어
-        객체가 남는다(4차 리뷰에서 잡힌 결함).
+        취소는 프로세스 종료 때만 발생하는데, 그 순간 삭제를 await 하면 취소를
+        삼키게 되고 루프가 닫히는 중이라 성공도 보장할 수 없다. 그래서 기록만 한다.
         """
+        import logging
+
         from app.services import audio_transcriber as at
 
-        at.wait_for_cleanups()
-
-        order: list[str] = []
-        upload_started = asyncio.Event()
-        loop = asyncio.get_running_loop()
-
-        def slow_prepare(video_id, job_name, s3_key, uploaded_keys):
-            uploaded_keys.add(s3_key)
-            loop.call_soon_threadsafe(upload_started.set)
-            time.sleep(0.4)  # drain 타임아웃보다 훨씬 길게
-            order.append("upload_done")
-            return f"s3://bucket/{s3_key}"
+        async def slow_wait(_job_name):
+            await asyncio.sleep(0.15)
+            return "결과텍스트"
 
         with (
-            patch.object(at, "UPLOAD_DRAIN_TIMEOUT", 0.05),
-            patch.object(at, "_download_and_upload_sync", slow_prepare),
+            patch.object(
+                at,
+                "_download_and_upload_sync",
+                return_value="s3://bucket/audio-summary/test.mp3",
+            ),
             patch.object(at, "_start_transcription_job"),
-            patch.object(at, "_delete_from_s3", lambda key: order.append("delete")),
+            patch.object(at, "_wait_for_transcription", slow_wait),
+            patch.object(at, "_delete_from_s3") as mock_delete,
+            caplog.at_level(logging.WARNING, logger="app.services.audio_transcriber"),
         ):
             task = asyncio.create_task(at.transcribe_audio("test_vid"))
-            await upload_started.wait()
+            await asyncio.sleep(0.05)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            await asyncio.sleep(0.6)  # 업로드 스레드 종료 대기
-            at.wait_for_cleanups()
 
-        assert order[:1] != ["delete"], f"삭제가 업로드를 앞질렀다: {order}"
+        mock_delete.assert_not_called()
+        assert any("취소로 S3 오디오가 남았습니다" in r.message for r in caplog.records)
 
 
 # =============================================================================

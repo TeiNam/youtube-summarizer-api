@@ -15,7 +15,6 @@ import logging
 import os
 import shutil
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -46,10 +45,6 @@ MAX_AUDIO_DURATION = int(os.environ.get("TRANSCRIBE_MAX_DURATION", "7200"))
 TRANSCRIPT_FETCH_TIMEOUT = 30
 TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
 
-# 취소 후 업로드 스레드가 끝나기를 기다리는 시간(초). 이 시간을 넘기면 정리를
-# 포기한다 — 영원히 붙잡고 있는 것보다 낫고, 남은 객체는 버킷 수명 주기가 처리한다.
-UPLOAD_DRAIN_TIMEOUT = 120
-
 # 무거운 블로킹 작업(yt-dlp 다운로드 + ffmpeg 변환 + S3 업로드) 전용 스레드풀.
 # 기본 executor 를 쓰면 자막 추출·Bedrock 호출과 스레드를 다투다가
 # 폴백 몇 건으로 API 전체가 정체된다(실측: 0.5s 작업이 4.2s).
@@ -57,29 +52,6 @@ _DOWNLOAD_WORKERS = int(os.environ.get("TRANSCRIBE_DOWNLOAD_WORKERS", "2"))
 _download_executor = ThreadPoolExecutor(
     max_workers=_DOWNLOAD_WORKERS, thread_name_prefix="yts-audio"
 )
-
-# S3 정리 전용 풀. 다운로드 풀과 분리해야 한다 — 정리 작업이 다운로드 풀의 워커를
-# 점유한 채 '아직 시작도 못 한 업로드'의 완료를 기다리면 서로를 막아 교착된다.
-_cleanup_executor = ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="yts-cleanup"
-)
-
-# 진행 중인 정리 작업. 정리는 fire-and-forget 이라 호출자가 기다리지 않는데,
-# 테스트는 완료를 확인해야 하므로 여기에 모아 둔다(wait_for_cleanups).
-_pending_cleanups: "list" = []
-
-
-def wait_for_cleanups(timeout: float = 5.0) -> None:
-    """진행 중인 S3 정리 작업이 끝나기를 기다린다 (테스트·종료 처리용).
-
-    운영 경로에서는 호출하지 않는다 — 정리를 기다리려고 요청을 붙잡을 이유가 없다.
-    """
-    pending, _pending_cleanups[:] = list(_pending_cleanups), []
-    for future in pending:
-        try:
-            future.result(timeout=timeout)
-        except Exception as e:  # pragma: no cover - 방어적
-            logger.warning("S3 정리 작업 대기 실패: %s", e)
 
 
 def _reject_live_or_too_long(info: dict, *, incomplete: bool = False):
@@ -323,39 +295,15 @@ def _fetch_transcript_text(transcript_uri: str) -> str:
         raise RuntimeError(f"Transcribe 결과 파싱 실패: {e}") from e
 
 
-def _prepare_audio_in_thread(
-    video_id: str,
-    job_name: str,
-    s3_key: str,
-    uploaded_keys: set[str],
-    done: "threading.Event",
-) -> str:
-    """_download_and_upload_sync 를 실행하고 끝나면 done 을 세팅한다 (워커 스레드).
-
-    완료 신호를 여기서 세팅하는 이유: 정리 스레드는 업로드 완료를 기다려야 하는데
-    asyncio future 는 이벤트 루프가 돌아야 완료되므로 스레드에서 기다리면
-    루프가 멈춘 상황에서 영원히 대기한다(실측). 그래서 스레드 간 신호는
-    threading.Event 로 주고받는다.
-    """
-    try:
-        return _download_and_upload_sync(video_id, job_name, s3_key, uploaded_keys)
-    finally:
-        done.set()
-
-
-def _download_and_upload_sync(
-    video_id: str, job_name: str, s3_key: str, uploaded_keys: set[str]
-) -> str:
+def _download_and_upload_sync(video_id: str, job_name: str, s3_key: str) -> str:
     """오디오를 내려받아 S3 에 올린다 (전용 스레드풀에서 실행).
 
-    임시 디렉터리는 성공·실패 모두 정리한다. 업로드를 시도했으면 uploaded_keys 에
-    키를 넣어 호출자가 정리할 수 있게 한다(취소되어도 삭제가 누락되지 않는다).
+    임시 디렉터리는 성공·실패 모두 정리한다.
 
     Args:
         video_id: 유튜브 비디오 ID
         job_name: 파일명으로 쓸 작업 이름
         s3_key: 업로드할 S3 객체 키
-        uploaded_keys: 업로드를 시도한 키를 넣을 집합
 
     Returns:
         업로드된 S3 URI
@@ -367,42 +315,11 @@ def _download_and_upload_sync(
         audio_file = _download_audio(video_id, output_path)
 
         logger.info("비디오 %s: S3 업로드 시작", video_id)
-        # 업로드 직전에 표시한다 — 호출자가 await 를 취소해도 이 스레드는 계속
-        # 돌아 업로드를 마치므로, 반환값에만 의존하면 취소 시 객체가 고아가 된다.
-        uploaded_keys.add(s3_key)
         return _upload_to_s3(audio_file, s3_key)
     finally:
         # yt-dlp 가 .part·.webm 등 중간 파일을 남기므로 os.rmdir 로는 못 지운다
         shutil.rmtree(temp_dir, ignore_errors=True)
         logger.debug("임시 디렉터리 정리: %s", temp_dir)
-
-
-def _drain_and_delete(
-    upload_done: "threading.Event", uploaded_keys: set[str], video_id: str
-) -> None:
-    """업로드 완료를 기다린 뒤 S3 오디오를 삭제한다 (정리 스레드에서 실행).
-
-    이벤트 루프가 아니라 스레드에서 도는 이유는 transcribe_audio 의 finally 주석 참고.
-    업로드 스레드가 세팅하는 Event 를 기다리므로 '삭제가 업로드보다 먼저 나가는'
-    순서 문제가 생기지 않는다. asyncio future 를 기다리지 않는 이유는
-    _download_and_upload_sync 의 done 인자 설명 참고.
-
-    Args:
-        upload_done: 다운로드·업로드 함수가 끝나면 세팅되는 이벤트
-        uploaded_keys: 업로드를 시도한 S3 키 집합 (업로드 스레드가 채운다)
-        video_id: 로그용 비디오 ID
-    """
-    if not upload_done.wait(timeout=UPLOAD_DRAIN_TIMEOUT):
-        logger.warning(
-            "비디오 %s: 업로드 완료 대기 시간(%ds) 초과 — S3 정리를 건너뜁니다. "
-            "남은 객체는 버킷 수명 주기가 처리합니다.",
-            video_id,
-            UPLOAD_DRAIN_TIMEOUT,
-        )
-        return
-
-    for key in uploaded_keys:
-        _delete_from_s3(key)  # 자체적으로 예외를 삼키고 경고만 남긴다
 
 
 async def transcribe_audio(video_id: str) -> str:
@@ -424,29 +341,17 @@ async def transcribe_audio(video_id: str) -> str:
     job_name = f"yt-{video_id}-{uuid.uuid4().hex[:8]}"
     s3_key = f"audio-summary/{job_name}.mp3"
     loop = asyncio.get_running_loop()
-    # 업로드를 시도한 키를 워커 스레드가 여기에 넣는다. 반환값 대신 이걸 보는 이유는
-    # await 가 취소돼도 스레드는 업로드를 마치기 때문이다(반환값은 버려진다).
-    uploaded_keys: set[str] = set()
-    # 업로드 스레드가 끝나면 세팅한다. 정리 스레드가 이걸 기다려 삭제 순서를 보장한다.
-    upload_done = threading.Event()
-    upload_started = False
+    uploaded = False
 
+    # 정리를 finally 가 아니라 각 종료 경로에 명시적으로 둔다. finally 에서 await 하면
+    # 취소 도중에도 실행되어 취소 의미가 흐려지고(실측: 취소가 삼켜지는 경우가 있다),
+    # 취소 시점에는 애초에 삭제 성공을 보장할 수 없다.
     try:
-        upload_started = True
-        prepare_future = loop.run_in_executor(
+        s3_uri = await loop.run_in_executor(
             _download_executor,
-            partial(
-                _prepare_audio_in_thread,
-                video_id,
-                job_name,
-                s3_key,
-                uploaded_keys,
-                upload_done,
-            ),
+            partial(_download_and_upload_sync, video_id, job_name, s3_key),
         )
-        # shield 로 감싼다 — 취소 시 이 await 만 풀리고 스레드는 계속 돌아
-        # 업로드를 마친다(그 완료를 정리 스레드가 upload_done 으로 기다린다).
-        s3_uri = await asyncio.shield(prepare_future)
+        uploaded = True
 
         logger.info("비디오 %s: Transcribe 작업 시작", video_id)
         await loop.run_in_executor(
@@ -456,11 +361,35 @@ async def transcribe_audio(video_id: str) -> str:
         logger.info("비디오 %s: Transcribe 작업 완료 대기 중", video_id)
         text = await _wait_for_transcription(job_name)
         logger.info("비디오 %s: 음성 인식 완료", video_id)
+
+        # 성공 경로 — Transcribe 가 읽고 나면 오디오는 쓸 데가 없다
+        await loop.run_in_executor(None, partial(_delete_from_s3, s3_key))
         return text
 
-    except RuntimeError:
+    except asyncio.CancelledError:
+        # ponytail: 취소 시에는 삭제를 시도하지 않고 남은 객체만 기록한다. 취소는 이
+        # 앱에서 프로세스 종료 때만 발생한다(BackgroundTasks 를 취소하는 코드가 없다).
+        # 그 순간 삭제를 await 하면 이벤트 루프가 닫히는 중이라 성공을 보장할 수 없고,
+        # 취소가 삼켜질 수도 있다. 남은 객체는 버킷 수명 주기 규칙으로 지운다
+        # (README 의 'S3 오디오 정리' 항목).
+        if uploaded:
+            logger.warning(
+                "비디오 %s: 취소로 S3 오디오가 남았습니다 — s3://%s/%s "
+                "(버킷 수명 주기 규칙으로 정리됩니다)",
+                video_id,
+                S3_BUCKET_NAME,
+                s3_key,
+            )
         raise
+
     except Exception as e:
+        # 실패 경로 — 업로드된 오디오를 지운다. _delete_from_s3 는 자체적으로
+        # 예외를 삼키므로 원래 오류를 덮지 않는다.
+        if uploaded:
+            await loop.run_in_executor(None, partial(_delete_from_s3, s3_key))
+
+        if isinstance(e, RuntimeError):
+            raise
         logger.error(
             "비디오 %s: 음성 인식 중 예상치 못한 오류 - %s",
             video_id,
@@ -468,19 +397,3 @@ async def transcribe_audio(video_id: str) -> str:
             exc_info=True,
         )
         raise RuntimeError(f"음성 인식 실패: {e}") from e
-    finally:
-        # 취소(CancelledError)로 빠져나갈 때도 여기를 지난다.
-        #
-        # 정리는 이벤트 루프에서 기다리지 않고 워커 스레드에 맡긴다. 이유가 둘이다:
-        #   ① 순서 — 업로드가 끝나기 전에 삭제하면 삭제가 먼저 나가고 그 뒤 업로드가
-        #      완료되어 객체가 남는다(실측). 스레드 안에서 future.result() 로 업로드
-        #      완료를 기다린 뒤 삭제하면 순서가 보장된다.
-        #   ② 취소 의미 — finally 에서 await 하면 취소를 삼키거나(정상 완료로 위장)
-        #      두 번째 CancelledError 를 맞는다. 여기서는 아무것도 await 하지 않아
-        #      CancelledError 가 그대로 전파된다.
-        if upload_started:
-            _pending_cleanups.append(
-                _cleanup_executor.submit(
-                    _drain_and_delete, upload_done, uploaded_keys, video_id
-                )
-            )
