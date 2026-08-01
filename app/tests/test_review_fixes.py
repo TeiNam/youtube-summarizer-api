@@ -1,6 +1,9 @@
-"""2-way 리뷰에서 확정된 결함 10건의 회귀 테스트
+"""2-way 교차 리뷰에서 확정된 결함의 회귀 테스트
 
-각 테스트는 수정 전 코드에서 실패한다 — 무엇을 고쳤는지 고정하는 것이 목적이다.
+1차 리뷰 10건 + 2차 리뷰 6건(1차 수정이 만든 결함)을 다룬다.
+
+각 클래스에는 결함을 직접 재현하는 테스트와, 그 수정이 정상 동작을 깨지 않았는지
+확인하는 동반 테스트가 함께 있다. 후자는 수정 전에도 통과한다 — 회귀 방지용이다.
 """
 
 import asyncio
@@ -402,23 +405,103 @@ class TestTaskManagerEviction:
             assert manager.get_task(running) is not None
 
     def test_running_tasks_never_evicted_by_max_entries(self) -> None:
-        """상한을 넘겨도 진행 중인 작업은 버리지 않아야 한다.
+        """진행 중인 작업은 상한 정리로 버리지 않아야 한다.
 
         버리면 파이프라인은 계속 도는데 update_status 가 무시되고 조회는 영구 404 가
         된다 — 202 를 받은 사용자가 결과를 영원히 못 받는다(2차 리뷰에서 잡힌 결함).
+        상한이 차면 버리는 대신 새 접수를 거절한다(3차 리뷰 반영).
         """
+        from app.services.task_manager import TaskRejectedError
+
         manager = TaskManager()
         with patch("app.services.task_manager.MAX_TASKS", 3):
             ids = []
-            for _ in range(5):  # 상한보다 많이, 전부 진행 중
+            for _ in range(3):  # 상한까지 채운다, 전부 진행 중
                 tid = manager.create_task("https://youtu.be/x", "ko")
                 manager.update_status(tid, TaskStatus.SUMMARIZING)
                 ids.append(tid)
                 time.sleep(0.001)
 
+            # 더 넣으려 하면 거절되고, 기존 진행 중 작업은 하나도 사라지지 않는다
+            for _ in range(5):
+                with pytest.raises(TaskRejectedError):
+                    manager.create_task("https://youtu.be/y", "ko")
+
             alive = [i for i in ids if manager.get_task(i) is not None]
 
-        assert len(alive) == 5, "진행 중인 작업이 조용히 사라졌다"
+        assert len(alive) == 3, "진행 중인 작업이 조용히 사라졌다"
+
+    def test_rejects_new_tasks_when_full_of_running(self) -> None:
+        """진행 중 작업이 상한을 채우면 새 접수를 거절해야 한다.
+
+        진행 중 작업을 못 버리게 한 뒤에는 상한이 무의미해져 PENDING 이 무제한
+        쌓였다(3차 리뷰에서 잡힌 결함 — 실측: 상한 5 인데 200건 누적).
+        """
+        from app.services.task_manager import TaskRejectedError
+
+        manager = TaskManager()
+        with patch("app.services.task_manager.MAX_TASKS", 3):
+            for _ in range(3):
+                tid = manager.create_task("https://youtu.be/x", "ko")
+                manager.update_status(tid, TaskStatus.SUMMARIZING)
+
+            with pytest.raises(TaskRejectedError):
+                manager.create_task("https://youtu.be/y", "ko")
+
+    def test_accepts_again_after_task_finishes(self) -> None:
+        """작업이 끝나 자리가 나면 다시 접수해야 한다."""
+        from app.services.task_manager import TaskRejectedError
+
+        manager = TaskManager()
+        with patch("app.services.task_manager.MAX_TASKS", 2):
+            first = manager.create_task("https://youtu.be/x", "ko")
+            manager.update_status(first, TaskStatus.SUMMARIZING)
+            second = manager.create_task("https://youtu.be/x", "ko")
+            manager.update_status(second, TaskStatus.SUMMARIZING)
+
+            with pytest.raises(TaskRejectedError):
+                manager.create_task("https://youtu.be/z", "ko")
+
+            # 하나가 끝나고 TTL 이 지나면 자리가 생긴다
+            manager.update_status(first, TaskStatus.COMPLETED, result={"a": 1})
+            with patch("app.services.task_manager.TASK_TTL_SECONDS", 0):
+                time.sleep(0.01)
+                assert manager.create_task("https://youtu.be/z", "ko")
+
+    def test_busy_api_returns_503(self) -> None:
+        """상한이 가득 차면 API 가 503 을 반환해야 한다 (202 를 계속 주면 안 된다).
+
+        백그라운드 파이프라인은 실행되지 않게 막는다 — 실제로 돌아 완료되면 자리가
+        비어 503 이 나오지 않는다.
+        """
+        client = TestClient(app)
+        task_manager._tasks.clear()
+        try:
+            with (
+                patch("app.services.task_manager.MAX_TASKS", 2),
+                patch("app.api.routes.process_summary"),  # 파이프라인 실행 차단
+            ):
+                ok_codes = [
+                    client.post(
+                        f"{PREFIX}/summarize",
+                        json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                        headers=AUTH_HEADERS,
+                    ).status_code
+                    for _ in range(2)
+                ]
+
+                busy = client.post(
+                    f"{PREFIX}/summarize",
+                    json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                    headers=AUTH_HEADERS,
+                )
+
+            assert ok_codes == [202, 202]
+            assert busy.status_code == 503
+            assert busy.json()["error"]["code"] == "SERVICE_BUSY"
+            assert busy.headers.get("retry-after") == "60"
+        finally:
+            task_manager._tasks.clear()
 
     def test_get_task_returns_copy(self) -> None:
         """조회 결과를 고쳐도 내부 상태가 바뀌지 않아야 한다."""
@@ -538,29 +621,37 @@ class TestSemaphorePerEventLoop:
     def test_works_across_separate_event_loops(self) -> None:
         """루프를 새로 만들어 돌려도 작업이 완료되어야 한다.
 
-        단일 전역 세마포어면 두 번째 루프에서 'bound to a different event loop' 로
-        작업이 PENDING 에 갇힌다(2차 리뷰에서 잡힌 결함).
+        **경합을 반드시 일으켜야 하는 테스트다.** asyncio.Semaphore 는 대기자가 생기는
+        순간 그 루프에 묶이므로, 무경합으로 한 건만 돌리면 단일 전역 세마포어도
+        통과해 버린다(수정 전에도 통과 = 공허한 테스트). 상한보다 많은 작업을 동시에
+        띄워 대기를 만든 뒤, 다른 루프에서 같은 일을 반복한다.
         """
         from unittest.mock import AsyncMock
 
         from app.services import pipeline as pl
 
         sufficient = "충분히 긴 자막 텍스트다. " * 200
+        concurrency = 2
+        jobs = concurrency * 3  # 상한보다 많이 → 대기자 발생 → 루프에 바인딩
 
-        async def run_once() -> str:
+        async def run_batch() -> list[str]:
             manager = TaskManager()
-            task_id = manager.create_task("https://youtu.be/x", "ko")
+            task_ids = [
+                manager.create_task("https://youtu.be/x", "ko") for _ in range(jobs)
+            ]
+
+            async def slow_extract(_video_id):
+                await asyncio.sleep(0.02)  # 세마포어를 붙잡고 있어 대기자를 만든다
+                return (sufficient, "en")
+
             with (
+                patch.object(pl, "MAX_CONCURRENT_PIPELINES", concurrency),
                 patch.object(
                     pl,
                     "fetch_video_metadata",
                     AsyncMock(return_value=("제목", 600, "2026-01-01")),
                 ),
-                patch.object(
-                    pl,
-                    "extract_subtitles_with_language",
-                    AsyncMock(return_value=(sufficient, "en")),
-                ),
+                patch.object(pl, "extract_subtitles_with_language", slow_extract),
                 patch.object(pl, "translate_text", AsyncMock(return_value="번역문")),
                 patch.object(
                     pl,
@@ -568,12 +659,20 @@ class TestSemaphorePerEventLoop:
                     AsyncMock(return_value={"summary": "s", "key_points": ["a"]}),
                 ),
             ):
-                await pl.process_summary(task_id, "vid", "ko", manager)
-            return manager.get_task(task_id)["status"]
+                await asyncio.gather(
+                    *[
+                        pl.process_summary(tid, "vid", "ko", manager)
+                        for tid in task_ids
+                    ]
+                )
+            return [manager.get_task(t)["status"] for t in task_ids]
 
-        # 서로 다른 루프에서 두 번 실행한다 (asyncio.run 은 매번 새 루프를 만든다)
-        assert asyncio.run(run_once()) == TaskStatus.COMPLETED
-        assert asyncio.run(run_once()) == TaskStatus.COMPLETED
+        # asyncio.run 은 매번 새 루프를 만든다 — 두 번째가 수정 전에는 실패한다
+        first = asyncio.run(run_batch())
+        second = asyncio.run(run_batch())
+
+        assert all(s == TaskStatus.COMPLETED for s in first), first
+        assert all(s == TaskStatus.COMPLETED for s in second), second
 
 
 # =============================================================================

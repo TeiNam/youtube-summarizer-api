@@ -10,6 +10,7 @@ AWS S3에 업로드한 뒤 AWS Transcribe를 사용하여 텍스트로 변환한
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -44,6 +45,10 @@ MAX_AUDIO_DURATION = int(os.environ.get("TRANSCRIBE_MAX_DURATION", "7200"))
 # timeout 이 없으면 소켓이 응답을 안 줄 때 스레드가 무기한 점유된다.
 TRANSCRIPT_FETCH_TIMEOUT = 30
 TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
+
+# 취소 후 업로드 스레드가 끝나기를 기다리는 시간(초). 이 시간을 넘기면 정리를
+# 포기한다 — 영원히 붙잡고 있는 것보다 낫고, 남은 객체는 버킷 수명 주기가 처리한다.
+UPLOAD_DRAIN_TIMEOUT = 120
 
 # 무거운 블로킹 작업(yt-dlp 다운로드 + ffmpeg 변환 + S3 업로드) 전용 스레드풀.
 # 기본 executor 를 쓰면 자막 추출·Bedrock 호출과 스레드를 다투다가
@@ -350,14 +355,18 @@ async def transcribe_audio(video_id: str) -> str:
     # 업로드를 시도한 키를 워커 스레드가 여기에 넣는다. 반환값 대신 이걸 보는 이유는
     # await 가 취소돼도 스레드는 업로드를 마치기 때문이다(반환값은 버려진다).
     uploaded_keys: set[str] = set()
+    prepare_future: "asyncio.Future[str] | None" = None
 
     try:
-        s3_uri = await loop.run_in_executor(
+        prepare_future = loop.run_in_executor(
             _download_executor,
             partial(
                 _download_and_upload_sync, video_id, job_name, s3_key, uploaded_keys
             ),
         )
+        # shield 로 감싼다 — 취소 시 이 await 만 풀리고 future 는 살아 있어야
+        # finally 에서 스레드 완료를 기다린 뒤 정확히 정리할 수 있다.
+        s3_uri = await asyncio.shield(prepare_future)
 
         logger.info("비디오 %s: Transcribe 작업 시작", video_id)
         await loop.run_in_executor(
@@ -380,9 +389,20 @@ async def transcribe_audio(video_id: str) -> str:
         )
         raise RuntimeError(f"음성 인식 실패: {e}") from e
     finally:
-        # 취소(CancelledError)로 빠져나갈 때도 여기를 지난다. shield 로 감싸 삭제
-        # 자체가 취소되지 않게 한다 — 안 그러면 취소 시 오디오가 S3 에 남는다.
+        # 취소(CancelledError)로 빠져나갈 때도 여기를 지난다.
+        # 순서가 중요하다: 업로드 스레드가 끝나기 전에 삭제하면 삭제가 먼저 나가고
+        # 그 뒤에 업로드가 완료되어 객체가 남는다(shield 는 순서를 보장하지 않는다).
+        # 그래서 ① 워커 완료를 기다리고 ② 그다음에 삭제한다.
+        #
+        # 여기서 나는 예외는 모두 삼킨다 — 정리 실패로 원래 예외를 덮으면
+        # 호출자가 진짜 원인을 못 본다. prepare_future 의 예외는 이미 위에서 처리됐다.
+        if prepare_future is not None:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await asyncio.wait_for(
+                    asyncio.shield(prepare_future), timeout=UPLOAD_DRAIN_TIMEOUT
+                )
         for key in uploaded_keys:
-            await asyncio.shield(
-                loop.run_in_executor(None, partial(_delete_from_s3, key))
-            )
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await asyncio.shield(
+                    loop.run_in_executor(None, partial(_delete_from_s3, key))
+                )

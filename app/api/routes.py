@@ -18,7 +18,7 @@ from app.models.responses import (
     TaskStatus,
 )
 from app.services.pipeline import process_summary
-from app.services.task_manager import TaskManager
+from app.services.task_manager import TaskManager, TaskRejectedError
 from app.services.url_validator import validate_youtube_url
 
 logger = logging.getLogger(__name__)
@@ -60,8 +60,24 @@ async def summarize(request: SummarizeRequest, background_tasks: BackgroundTasks
         )
         return UnicodeJSONResponse(status_code=422, content=error_response.model_dump())
 
-    # 작업 생성
-    task_id = task_manager.create_task(request.url, request.target_language)
+    # 작업 생성 (상한이 가득 차면 503 으로 거절한다 — 접수만 받고 무한히 쌓아 두면
+    # 202 를 받은 요청들이 메모리만 먹다가 프로세스가 죽는다)
+    try:
+        task_id = task_manager.create_task(request.url, request.target_language)
+    except TaskRejectedError as e:
+        logger.warning("작업 접수 거절: %s", e)
+        error_response = ErrorResponse(
+            error=ErrorDetail(
+                code="SERVICE_BUSY",
+                message="처리 대기 중인 작업이 많습니다. 잠시 후 다시 시도해 주세요.",
+            )
+        )
+        return UnicodeJSONResponse(
+            status_code=503,
+            content=error_response.model_dump(),
+            headers={"Retry-After": "60"},
+        )
+
     logger.info("작업 생성 완료: %s (비디오: %s)", task_id, video_id)
 
     # 백그라운드에서 파이프라인 실행

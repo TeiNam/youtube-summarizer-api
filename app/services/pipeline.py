@@ -8,6 +8,7 @@
 import asyncio
 import logging
 import os
+import threading
 
 from app.models.responses import TaskStatus
 from app.services.audio_transcriber import transcribe_audio
@@ -42,22 +43,33 @@ PIPELINE_FAILED_MESSAGE = "요약 처리 중 오류가 발생했습니다. 잠�
 # 함께 튀고, 스레드풀도 고갈된다. 대기는 세마포어에서 순서를 기다리는 형태가 된다.
 MAX_CONCURRENT_PIPELINES = int(os.environ.get("MAX_CONCURRENT_PIPELINES", "4"))
 
-# 세마포어는 만들어진 이벤트 루프에 묶인다. 모듈 임포트 시점에는 루프가 없으므로
-# 첫 사용 시점에 만들고, 루프별로 따로 보관한다 — 단일 객체를 재사용하면 테스트나
-# 멀티 루프 환경에서 'bound to a different event loop' 로 작업이 PENDING 에 갇힌다.
-_semaphores: "dict[asyncio.AbstractEventLoop, asyncio.Semaphore]" = {}
+# asyncio.Semaphore 는 처음 경합할 때 그 이벤트 루프에 묶여, 다른 루프에서 쓰면
+# 'bound to a different event loop' 로 죽는다(실측). 그래서 루프별로 따로 만든다.
+#
+# ponytail: 상한이 프로세스 전체가 아니라 루프별이다 — 루프가 N개면 최대
+# N * MAX_CONCURRENT_PIPELINES 가 돌 수 있다. 이 앱은 uvicorn --workers 1 로 단일
+# 루프라 실제로는 같은 값이고, 여러 루프는 테스트에서만 생긴다. 워커를 늘리거나
+# 루프를 여러 개 띄우게 되면 전역 카운터를 더한다(그때는 프로세스 간 상한도
+# 필요해지므로 Redis 세마포어가 맞다).
+_loop_semaphores: "dict[asyncio.AbstractEventLoop, asyncio.Semaphore]" = {}
+_semaphore_lock = threading.Lock()
 
 
 def _get_semaphore() -> asyncio.Semaphore:
-    """현재 이벤트 루프의 동시 실행 제한 세마포어를 반환한다."""
+    """현재 이벤트 루프의 동시 실행 제한 세마포어를 반환한다.
+
+    루프가 여러 스레드에서 돌 수 있으므로 딕셔너리 접근을 락으로 감싼다 —
+    안 하면 동시 생성·정리에서 'dictionary changed size' 나 KeyError 가 난다.
+    """
     loop = asyncio.get_running_loop()
-    semaphore = _semaphores.get(loop)
-    if semaphore is None:
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
-        _semaphores[loop] = semaphore
-        # 닫힌 루프의 항목이 쌓이지 않게 정리한다
-        for stale in [lp for lp in _semaphores if lp.is_closed()]:
-            del _semaphores[stale]
+    with _semaphore_lock:
+        semaphore = _loop_semaphores.get(loop)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(MAX_CONCURRENT_PIPELINES)
+            # 닫힌 루프 항목을 정리한다 (스냅샷을 떠서 순회 중 변경을 피한다)
+            for stale in [lp for lp in list(_loop_semaphores) if lp.is_closed()]:
+                _loop_semaphores.pop(stale, None)
+            _loop_semaphores[loop] = semaphore
     return semaphore
 
 
