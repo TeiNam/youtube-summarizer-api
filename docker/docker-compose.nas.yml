@@ -28,4 +28,11 @@ services:
       - ${HOST_STATE_DIR:?HOST_STATE_DIR 이 필요하다 — 인증서 마운트 경로}/aws-ra:/app/.aws-ra:ro
       - ${HOST_STATE_DIR:?HOST_STATE_DIR 이 필요하다 — 인증서 마운트 경로}/aws-config:/app/.aws:ro
     restart: unless-stopped
+    # 앱은 stdout 으로 JSON 로그를 쏜다 — 기본 json-file 드라이버는 무제한이어서
+    # NAS 볼륨(/volume1/@docker)에 계속 쌓인다. 컨테이너당 최대 30MB 로 묶는다.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # 헬스체크는 Dockerfile 의 HEALTHCHECK 를 쓴다(API_PREFIX 를 반영한 경로를 호출한다).
