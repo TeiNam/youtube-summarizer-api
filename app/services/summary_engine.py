@@ -43,6 +43,12 @@ PROMPTS_DIR = Path(
 # 한/영 혼합 기준으로 넉넉히 밑도는 값이다.
 MAX_INPUT_CHARS = int(os.environ.get("BEDROCK_MAX_INPUT_CHARS", "200000"))
 
+# 모델 응답 토큰 상한. effort/thinking 이 켜져 있으면 사고 토큰도 이 예산을
+# 함께 소진하므로, 본문만 계산한 값으로는 긴 영상에서 응답이 잘린다.
+# 기본값은 Claude 4.x/Opus 5 계열의 출력 한도(64k)이며, 출력 한도가 더 낮은
+# 모델(Haiku 3 = 4096 등)을 쓸 때는 반드시 내려야 한다.
+MAX_OUTPUT_TOKENS = int(os.environ.get("BEDROCK_MAX_OUTPUT_TOKENS", "64000"))
+
 
 def _build_body(prompt: str, max_tokens: int, *, use_effort: bool) -> str:
     """Bedrock invoke_model 요청 본문을 만든다.
@@ -123,8 +129,8 @@ def _check_not_truncated(response_body: dict, what: str) -> None:
         usage = response_body.get("usage", {})
         raise RuntimeError(
             f"{what} 결과가 max_tokens 로 잘렸습니다 "
-            f"(출력 {usage.get('output_tokens', '?')} 토큰). "
-            "입력이 너무 길거나 max_tokens 가 작습니다."
+            f"(출력 {usage.get('output_tokens', '?')} / 상한 {MAX_OUTPUT_TOKENS} 토큰). "
+            "BEDROCK_MAX_OUTPUT_TOKENS 를 올리거나 입력을 줄이세요."
         )
 
 
@@ -217,7 +223,7 @@ async def translate_text(text: str, target_language: str = "ko") -> str:
     )
 
     # 번역은 effort 불필요 (단순 변환) — 토큰 낭비 방지를 위해 미적용
-    body = _build_body(prompt, max_tokens=20000, use_effort=False)
+    body = _build_body(prompt, max_tokens=MAX_OUTPUT_TOKENS, use_effort=False)
 
     try:
         loop = asyncio.get_running_loop()
@@ -252,7 +258,7 @@ async def summarize_text(text: str) -> dict:
     prompt = _render_prompt("summarize", TEXT=_truncate(text))
 
     # 요약은 심층 분석이므로 effort 적용 대상 (BEDROCK_EFFORT 설정 시)
-    body = _build_body(prompt, max_tokens=20000, use_effort=True)
+    body = _build_body(prompt, max_tokens=MAX_OUTPUT_TOKENS, use_effort=True)
 
     try:
         loop = asyncio.get_running_loop()

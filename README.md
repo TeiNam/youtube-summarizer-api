@@ -140,6 +140,7 @@ docker exec youtube-summarizer-api aws sts get-caller-identity  # 컨테이너 �
 | `BEDROCK_MODEL_ID` | Bedrock 모델 ID (요약 품질 향상 시 `anthropic.claude-opus-4-8` 권장) | O |
 | `BEDROCK_EFFORT` | 추론 강도 `low\|medium\|high\|max` (Opus 4.8/4.6·Sonnet 4.6 전용, Haiku는 비워둘 것) | △ |
 | `BEDROCK_MAX_INPUT_CHARS` | 모델에 보낼 자막 길이 상한 (기본 200000) | △ |
+| `BEDROCK_MAX_OUTPUT_TOKENS` | 모델 응답 토큰 상한 (기본 64000). effort 사용 시 사고 토큰도 이 예산을 쓴다. 모델 출력 한도 초과 시 ValidationException (Haiku 3 은 4096) | △ |
 | `TRANSCRIBE_S3_BUCKET` | 음성 인식용 S3 버킷명 | △ |
 | `TRANSCRIBE_MAX_DURATION` | 음성 인식할 영상 길이 상한(초, 기본 7200). 라이브는 항상 거부 | △ |
 | `TRANSCRIBE_DOWNLOAD_WORKERS` | 오디오 다운로드 전용 스레드 수 (기본 2) | △ |
