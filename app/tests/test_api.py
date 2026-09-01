@@ -253,3 +253,40 @@ class TestErrorResponseFormat:
         data = response.json()
         assert "code" in data["error"]
         assert "message" in data["error"]
+
+
+# =============================================================================
+# 리버스 프록시 root_path 아래에서의 공개 경로 판정
+# =============================================================================
+
+
+class TestHealthBehindRootPath:
+    """uvicorn --root-path 로 띄운 경우에도 /health 는 인증 없이 열려야 한다.
+
+    uvicorn 은 --root-path 를 들어온 경로 앞에 **덧붙여서** scope["path"] 를 만든다
+    (httptools_impl: `full_path = self.root_path + path`). 그래서 헬스체크가
+    /yts/api/health 를 부르면 scope["path"] 는 /yts/api/yts/api/health 가 되고,
+    request.url.path 로 공개 경로를 판정하면 매칭이 빗나가 401 → 컨테이너 unhealthy(실측).
+    TestClient 는 덧붙이지 않으므로 그 scope 를 만들려면 요청 경로에 직접 두 번 넣는다.
+    """
+
+    ROOT_PATH = "/yts/api"
+
+    def test_health_open_without_api_key(self) -> None:
+        """root_path 아래 /health 는 API 키 없이 200 이어야 한다."""
+        proxied = TestClient(app, root_path=self.ROOT_PATH)
+        response = proxied.get(f"{self.ROOT_PATH}{PREFIX}/health")
+
+        assert response.status_code == 200, (
+            f"헬스체크가 {response.status_code} 를 받았다 — 공개 경로 판정이 "
+            "root_path 를 벗기지 않으면 컨테이너가 unhealthy 가 된다"
+        )
+        assert response.json() == {"status": "ok"}
+
+    def test_protected_path_still_requires_api_key(self) -> None:
+        """root_path 아래 보호 경로는 여전히 401 이어야 한다(인증을 열어버리지 않았는지)."""
+        proxied = TestClient(app, root_path=self.ROOT_PATH)
+        response = proxied.get(f"{self.ROOT_PATH}{PREFIX}/tasks/does-not-exist")
+
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "MISSING_API_KEY"
