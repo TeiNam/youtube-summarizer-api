@@ -4,21 +4,33 @@
 # ============================================================
 # Stage 1: 의존성 빌드
 # ============================================================
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
+
+# uv 로 의존성을 설치한다. 버전 고정 — :latest 는 빌드 재현성을 깬다.
+COPY --from=ghcr.io/astral-sh/uv:0.12.7 /uv /bin/uv
 
 WORKDIR /build
 
-COPY requirements-prod.txt .
+# UV_PYTHON·UV_PYTHON_DOWNLOADS: 베이스 이미지의 인터프리터를 쓰게 강제한다.
+# uv 가 자체 파이썬을 내려받으면 런타임 이미지에 없는 인터프리터를 가리키는 venv 가 된다.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=python3.13 \
+    UV_PYTHON_DOWNLOADS=never
 
-# 가상환경에 의존성 설치 (빌드 캐시 최대 활용)
-RUN python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /opt/venv/bin/pip install --no-cache-dir -r requirements-prod.txt
+# 앱 소스보다 먼저 복사한다 — 소스만 바뀐 빌드는 이 레이어를 캐시에서 재사용한다.
+COPY pyproject.toml uv.lock ./
+
+# --frozen: uv.lock 에 박힌 정확한 버전만 설치하고 lock 재생성을 막는다.
+# 잠금 없이 빌드하면 이미지마다 다른 버전이 들어간다(root_path 동작 차이처럼 실제로 물린다).
+# --no-dev: 테스트 의존성(pytest 등)은 이미지에 넣지 않는다.
+RUN uv sync --frozen --no-dev
 
 # ============================================================
 # Stage 2: 런타임 이미지
 # ============================================================
-FROM python:3.12-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 # 시스템 의존성 (yt-dlp에 ffmpeg 필요)
 RUN apt-get update && \

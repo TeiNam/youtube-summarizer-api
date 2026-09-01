@@ -1,6 +1,6 @@
 # YouTube Summary API
 
-![Python](https://img.shields.io/badge/Python-3.12-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.13-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.135-009688.svg)
 ![AWS](https://img.shields.io/badge/AWS-Cloud-FF9900.svg)
 ![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)
@@ -21,7 +21,7 @@
 
 ## 기술 스택
 
-- Python 3.12 / FastAPI / Uvicorn
+- Python 3.13 / FastAPI / Uvicorn (의존성 관리: uv)
 - AWS Bedrock (Claude), S3, Transcribe
 - AWS IAM Roles Anywhere (`aws_signing_helper` + `credential_process`)
 - yt-dlp, youtube-transcript-api
@@ -36,20 +36,20 @@
 git clone <repository-url>
 cd youtube-summary-api
 
-# 가상환경 생성 및 활성화
-python -m venv .venv
-source .venv/bin/activate
-
-# 의존성 설치
-pip install -r requirements.txt
+# 가상환경 + 의존성 설치 (uv.lock 에 고정된 버전 그대로)
+uv sync
 
 # 환경변수 설정
 cp .env.example .env
 # .env 파일을 편집하여 AWS_PROFILE·API 키를 입력 (액세스 키는 쓰지 않는다)
 
-# 서버 실행
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 서버 실행 (uv run 이 .venv 를 알아서 쓴다 — activate 불필요)
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+의존성 관리는 [uv](https://docs.astral.sh/uv/) 로 합니다. 파이썬 버전은 `.python-version`,
+의존성은 `pyproject.toml` + `uv.lock` 에 있습니다. 추가는 `uv add <패키지>`,
+테스트 전용은 `uv add --dev <패키지>` 를 씁니다 (`pip install` 은 lock 을 우회하므로 쓰지 않습니다).
 
 로컬에서는 `~/.aws/config` 에 `wl-bedrock-test` 프로파일이 있어야 합니다
 (자격증명 설정은 [AWS 자격증명](#aws-자격증명-iam-roles-anywhere) 참고).
@@ -227,5 +227,5 @@ curl http://localhost:8000/tasks/{task_id} \
 ### 테스트 실행
 
 ```bash
-python -m pytest app/tests/ -v
+uv run pytest -v
 ```

@@ -1,0 +1,31 @@
+[project]
+name = "youtube-summarizer-api"
+version = "0.1.0"
+description = "유튜브 영상 URL 을 받아 자막 추출·번역·요약을 수행하는 REST API"
+requires-python = ">=3.13"
+dependencies = [
+    "boto3>=1.43.86",
+    "fastapi>=0.141.1",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.3",
+    "uvicorn>=0.52.4",
+    "youtube-transcript-api>=1.2.4",
+    "yt-dlp>=2026.8.19",
+]
+
+# 앱이라 빌드·설치 대상이 아니다 — 실행은 `uvicorn app.main:app` 으로 한다.
+# 이 설정이 없으면 uv 가 프로젝트를 패키지로 빌드하려 들고, Docker 빌더 단계에서
+# 앱 소스 없이 `uv sync` 만 돌릴 수 없다(의존성 레이어 캐시가 깨진다).
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "hypothesis>=6.167.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["app/tests"]
