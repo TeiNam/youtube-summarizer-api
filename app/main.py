@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.routing import get_route_path
 
 from app.api.routes import router
 from app.models.json_response import UnicodeJSONResponse
@@ -93,7 +94,7 @@ async def timeout_exception_handler(request: Request, exc: Exception) -> JSONRes
     logger.error(
         "AWS 서비스 타임아웃 발생: %s %s",
         request.method,
-        request.url.path,
+        get_route_path(request.scope),
         exc_info=exc,
     )
     error_response = ErrorResponse(
@@ -120,7 +121,7 @@ async def validation_exception_handler(
     logger.warning(
         "요청 검증 실패: %s %s - %s: %s",
         request.method,
-        request.url.path,
+        get_route_path(request.scope),
         field or "(본문)",
         message,
     )
@@ -148,7 +149,7 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
     logger.error(
         "예상치 못한 오류 발생: %s %s - %s",
         request.method,
-        request.url.path,
+        get_route_path(request.scope),
         str(exc),
         exc_info=exc,
     )
@@ -174,10 +175,8 @@ API_KEY = os.environ.get("API_KEY")
 
 # 인증이 필요 없는 경로 목록 (API_PREFIX 반영)
 # /health만 공개, Swagger UI(/docs, /redoc, /openapi.json)는 인증 필요
-_public_suffixes = ["/health"]
-PUBLIC_PATHS = {f"{API_PREFIX}{p}" for p in _public_suffixes}
-# prefix 없는 원본 경로도 허용 (root_path 사용 시)
-PUBLIC_PATHS.update(_public_suffixes)
+# 라우터와 같은 기준(root_path 를 벗긴 경로)으로 비교한다 — 아래 미들웨어 주석 참고.
+PUBLIC_PATHS = {f"{API_PREFIX}/health"}
 
 if not API_KEY:
     logger.warning("API_KEY 환경변수가 설정되지 않았습니다. 인증이 비활성화됩니다.")
@@ -202,15 +201,21 @@ async def api_key_auth_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
 
+    # 라우터와 같은 기준으로 경로를 본다. ASGI 의 scope["path"] 에는 root_path 가
+    # 포함되므로(uvicorn --root-path) request.url.path 는 프리픽스가 두 번 들어간
+    # /yts/api/yts/api/health 가 된다 — 그대로 비교하면 공개 경로 판정이 빗나가
+    # 헬스체크가 401 을 받는다(실측: uvicorn 0.52). get_route_path 가 root_path 를 벗긴다.
+    route_path = get_route_path(request.scope)
+
     # 공개 경로는 인증 건너뜀
-    if request.url.path in PUBLIC_PATHS:
+    if route_path in PUBLIC_PATHS:
         return await call_next(request)
 
     # X-API-Key 헤더 확인
     request_api_key = request.headers.get("X-API-Key")
 
     if not request_api_key:
-        logger.warning("API 키 누락: %s %s", request.method, request.url.path)
+        logger.warning("API 키 누락: %s %s", request.method, route_path)
         error_response = ErrorResponse(
             error=ErrorDetail(code="MISSING_API_KEY", message="API 키가 필요합니다")
         )
@@ -222,7 +227,7 @@ async def api_key_auth_middleware(request: Request, call_next):
     if not secrets.compare_digest(
         request_api_key.encode("utf-8"), API_KEY.encode("utf-8")
     ):
-        logger.warning("유효하지 않은 API 키: %s %s", request.method, request.url.path)
+        logger.warning("유효하지 않은 API 키: %s %s", request.method, route_path)
         error_response = ErrorResponse(
             error=ErrorDetail(
                 code="INVALID_API_KEY", message="유효하지 않은 API 키입니다"
@@ -253,16 +258,19 @@ async def request_response_logging_middleware(request: Request, call_next):
     # 처리 시간 계산 (밀리초)
     process_time_ms = round((time.time() - start_time) * 1000, 2)
 
+    # root_path 를 벗긴 경로를 남긴다 — request.url.path 는 프리픽스가 두 번 찍힌다
+    route_path = get_route_path(request.scope)
+
     # 구조화된 로그 기록
     logger.info(
         "HTTP %s %s - %d (%.2fms)",
         request.method,
-        request.url.path,
+        route_path,
         response.status_code,
         process_time_ms,
         extra={
             "http_method": request.method,
-            "http_path": request.url.path,
+            "http_path": route_path,
             "http_status": response.status_code,
             "process_time_ms": process_time_ms,
         },

@@ -191,9 +191,11 @@ aws s3api put-bucket-lifecycle-configuration --bucket "$TRANSCRIBE_S3_BUCKET" \
 
 ### 함정 두 가지
 
-- **`API_PREFIX` 와 `ROOT_PATH` 를 동시에 설정하면** 프리픽스가 두 번 적용되어 미들웨어가
-  보는 경로가 `/yts/api/yts/api/...` 가 됩니다. 공개 경로 판정이 깨져 헬스체크가 401 을
-  받습니다. 프록시가 프리픽스를 벗기지 않는 구성이면 `API_PREFIX` 만 씁니다.
+- **`ROOT_PATH` 는 Swagger UI 경로 보정용입니다.** 프록시가 프리픽스를 벗기지 않는 구성이면
+  `API_PREFIX` 만으로 충분합니다. 둘 다 설정해도 동작하지만, uvicorn 이 `--root-path` 를
+  요청 경로 앞에 덧붙이므로 **uvicorn 액세스 로그에는 `/yts/api/yts/api/...` 로 두 번
+  찍힙니다**(앱이 보는 실제 라우팅 경로는 앱 JSON 로그의 값입니다). 예전에는 이 이중
+  경로 때문에 공개 경로 판정이 깨져 헬스체크가 401 을 받았습니다.
 - **`TRANSCRIBE_S3_BUCKET` 을 비우면** 코드 기본값 `youtube-summary-audio` 가 쓰이는데 그
   버킷은 계정에 없습니다(`NoSuchBucket`). 자막 없는 영상에서만 조용히 실패하므로 놓치기
   쉽습니다. IAM 정책에 포함된 버킷명을 반드시 넣습니다.
