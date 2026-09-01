@@ -46,12 +46,12 @@ __pycache__/
 *$py.class
 *.so
 
-# 가상 환경
+# 가상 환경 (.venv 는 uv sync 로 재현된다)
 .venv/
 venv/
 env/
 ENV/
-.python-version
+# .python-version 은 커밋한다 — uv 가 이 파일로 인터프리터를 고정한다.
 
 # 배포/빌드
 dist/
@@ -61,10 +61,11 @@ build/
 .eggs/
 MANIFEST
 
-# 패키지 관리
+# 패키지 관리 (uv.lock 은 커밋한다 — 빌드 재현성의 근거다)
 pip-log.txt
 pip-delete-this-directory.txt
 .pip/
+.uv-cache/
 
 # 테스트 & 커버리지
 .pytest_cache/
