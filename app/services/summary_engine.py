@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 # 프롬프트 템플릿의 {{VAR}} 자리표시자
 _PLACEHOLDER_PATTERN = re.compile(r"\{\{([A-Z_][A-Z0-9_]*)\}\}")
 
+# 요약 응답의 섹션 구분자 (`===DETAILED===` 처럼 줄 전체가 구분자여야 한다)
+_SECTION_PATTERN = re.compile(r"^===[ \t]*([A-Z_]+)[ \t]*===[ \t]*$", re.MULTILINE)
+
+# 목록 표식: `- `, `* `, `• `, `1. `, `1) `
+# 번호는 두 자리까지만 본다 — `\d+` 로 열어 두면 "2026. 하반기에는~" 처럼 연도로
+# 시작하는 인사이트의 연도를 표식으로 보고 잘라낸다(내용 유실).
+_BULLET_PATTERN = re.compile(r"(?:[-*•]|\d{1,2}[.)])[ \t]+")
+
+# 프롬프트가 허용하는 장르 (섹션 값이 자유 텍스트라 여기서 좁힌다)
+_GENRES = ("NEWS", "LECTURE", "TECH", "BUSINESS", "FINANCE", "OTHER")
+
 # AWS Bedrock 설정 (환경변수에서 로드)
 BEDROCK_MODEL_ID = os.environ.get(
     "BEDROCK_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0"
@@ -118,9 +129,10 @@ def _extract_text(content: list[dict]) -> str:
 def _check_not_truncated(response_body: dict, what: str) -> None:
     """응답이 max_tokens 로 잘렸는지 확인한다.
 
-    잘린 응답을 그대로 성공 처리하면 번역문 뒷부분이 사라진 채 완료되고,
-    요약에서는 JSON 이 닫히지 않아 파싱 실패로 나타난다. 잘렸다는 사실을
-    드러내는 편이 낫다.
+    잘린 응답을 그대로 성공 처리하면 번역문 뒷부분이 사라진 채 완료된다.
+    요약에서는 이 검사가 유일한 방어선이다 — 섹션 형식은 뒤쪽 섹션(INSIGHTS
+    등)이 통째로 없어도 파싱은 성공하므로, 인사이트가 빈 요약이 조용히 저장된다.
+    (JSON 이던 시절엔 닫히지 않은 괄호가 대신 알려 줬다.)
 
     Raises:
         RuntimeError: stop_reason 이 max_tokens 인 경우
@@ -134,45 +146,55 @@ def _check_not_truncated(response_body: dict, what: str) -> None:
         )
 
 
-def _coerce_str_list(value: object) -> list[str]:
-    """LLM 이 준 값을 문자열 리스트로 정규화한다.
+def _parse_sections(text: str) -> dict[str, str]:
+    """`===NAME===` 구분자로 나눈 {섹션명: 본문} 을 만든다.
 
-    프롬프트는 문자열 배열을 요구하지만 모델은 이를 어길 수 있다 —
-    null, 단일 문자열, 객체 배열이 실제로 온다. 그대로 저장하면 요약은
-    성공했는데 조회 시점에 응답 모델 검증이 터져 **완료된 작업이 영구히
-    500** 이 된다(실측). 그래서 저장 전에 여기서 흡수한다.
+    JSON 을 쓰지 않는 이유: 4KB 넘는 마크다운을 JSON 문자열 하나에 담게 하면,
+    모델이 따옴표 하나를 escape 하지 않는 순간 응답 전체가 버려진다 —
+    Bedrock 호출은 이미 성공하고 과금까지 끝난 뒤다(실측: detailed_summary
+    4.1KB 지점의 " 하나로 `Expecting ',' delimiter`, 작업 전체 실패).
+    구분자 방식은 본문에 따옴표·역슬래시·개행·코드블록이 그대로 들어가도 깨지지 않는다.
+
+    구분자는 줄 전체가 `===NAME===` 여야 한다 — 마크다운 setext 제목(`====`)이나
+    본문 안의 `===` 와 겹치지 않는다. 같은 섹션이 두 번 오면 뒤쪽을 쓴다
+    (모델이 형식 예시를 먼저 되풀이하는 경우가 있다).
     """
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-    if not isinstance(value, list):
-        return [str(value)]
+    parts = _SECTION_PATTERN.split(text)
+    # split 결과는 [머리말, 이름1, 본문1, 이름2, 본문2, ...] 형태다
+    return {parts[i]: parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}
 
+
+def _parse_bullets(block: str) -> list[str]:
+    """목록 블록을 문자열 리스트로 만든다.
+
+    응답 모델이 list[str] 을 요구하므로 여기서 형태를 확정한다. 모델이 목록
+    표식을 빼거나 번호로 쓰거나 한 항목을 여러 줄로 쓰는 경우를 모두 흡수한다 —
+    표식이 있으면 표식이 경계, 없으면 빈 줄이 경계다.
+    """
     items: list[str] = []
-    for item in value:
-        if item is None:
+    for raw in block.splitlines():
+        line = raw.strip()
+        if not line:
+            items.append("")  # 빈 줄은 항목 경계 (마지막에 걸러낸다)
             continue
-        if isinstance(item, str):
-            text = item
-        elif isinstance(item, dict):
-            # {"point": "..."} / {"insight": "..."} 처럼 감싸서 오는 경우
-            text = next(
-                (str(v) for v in item.values() if isinstance(v, str) and v.strip()),
-                json.dumps(item, ensure_ascii=False),
-            )
+        marker = _BULLET_PATTERN.match(line)
+        if marker:
+            items.append(line[marker.end() :].strip())
+        elif items and items[-1]:
+            items[-1] = f"{items[-1]} {line}"  # 표식 없는 줄은 앞 항목의 이어지는 문장
         else:
-            text = str(item)
-        if text.strip():
-            items.append(text)
-    return items
+            items.append(line)
+    return [item for item in items if item]
 
 
-def _coerce_str(value: object) -> str:
-    """LLM 이 준 값을 문자열로 정규화한다 (None → 빈 문자열)."""
-    if value is None:
-        return ""
-    return value if isinstance(value, str) else str(value)
+def _normalize_genre(block: str) -> str:
+    """GENRE 섹션에서 허용된 장르만 뽑는다 (없으면 OTHER).
+
+    섹션은 자유 텍스트라 모델이 "LECTURE (강의)" 처럼 적을 수 있다. 그대로 쓰면
+    사용자 요약 머리에 그 문장이 박히므로 허용 목록으로 좁힌다.
+    """
+    upper = block.upper()
+    return next((genre for genre in _GENRES if genre in upper), "OTHER")
 
 
 def _get_bedrock_client():
@@ -268,62 +290,43 @@ async def summarize_text(text: str) -> dict:
         _check_not_truncated(response_body, "요약")
         result_text = _extract_text(response_body["content"])
 
-        # JSON 블록 추출 (```json ... ``` 형식 처리)
-        if "```json" in result_text:
-            json_str = result_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in result_text:
-            json_str = result_text.split("```")[1].split("```")[0].strip()
-        else:
-            json_str = result_text.strip()
+        sections = _parse_sections(result_text)
 
-        result = json.loads(json_str)
-
-        # 모델이 JSON 배열이나 문자열을 최상위로 줄 수도 있다 — dict 가 아니면 거부
-        if not isinstance(result, dict):
+        detailed = sections.get("DETAILED", "")
+        if not detailed:
+            # 구분자를 못 찾으면 형식 위반이다. 조용히 빈 요약을 저장하면 호출
+            # 비용은 나갔는데 사용자는 빈 결과를 받고, 원인도 남지 않는다.
             raise RuntimeError(
-                f"요약 결과가 JSON 객체가 아닙니다: {type(result).__name__}"
+                "요약 결과에 DETAILED 섹션이 없습니다 "
+                f"(받은 섹션: {', '.join(sorted(sections)) or '없음'}, "
+                f"응답 앞부분: {result_text[:200]!r})"
             )
 
-        # 구조화된 요약 조합: 장르 + 한줄 요약 + 상세 요약 + 키워드 + 추가 탐색 주제
-        # 모든 필드를 정규화한다 — 모델이 프롬프트의 형식을 어겨도 저장 후
-        # 조회에서 터지지 않게 한다(잘못된 형태를 조회 시점까지 미루지 않는다).
-        genre = _coerce_str(result.get("genre")) or "OTHER"
-        one_line = _coerce_str(result.get("one_line_summary"))
-        detailed = _coerce_str(result.get("detailed_summary"))
-        keywords = result.get("keywords")
-        further = _coerce_str_list(result.get("further_topics"))
+        genre = _normalize_genre(sections.get("GENRE", ""))
+        one_line = sections.get("ONE_LINE", "")
+        keywords = sections.get("KEYWORDS", "")
+        further = sections.get("FURTHER", "")
 
-        # summary 필드에 풍부한 마크다운 요약을 담는다
+        # summary 필드에 풍부한 마크다운 요약을 담는다.
+        # KEYWORDS·FURTHER 는 모델이 이미 마크다운 목록으로 주므로 그대로 붙인다.
         summary_parts = [
             f"🏷️ 장르: {genre}",
             f"\n📌 한줄 요약\n{one_line}",
             f"\n📋 핵심 내용\n{detailed}",
         ]
-
-        if isinstance(keywords, list) and keywords:
-            kw_lines = "\n".join(
-                f"- **{_coerce_str(kw.get('term'))}**: {_coerce_str(kw.get('description'))}"
-                if isinstance(kw, dict)
-                else f"- {_coerce_str(kw)}"
-                for kw in keywords
-            )
-            summary_parts.append(f"\n🔑 키워드 & 용어\n{kw_lines}")
-
+        if keywords:
+            summary_parts.append(f"\n🔑 키워드 & 용어\n{keywords}")
         if further:
-            ft_lines = "\n".join(f"- {t}" for t in further)
-            summary_parts.append(f"\n❓ 추가 탐색 주제\n{ft_lines}")
+            summary_parts.append(f"\n❓ 추가 탐색 주제\n{further}")
 
         summary = "\n".join(summary_parts)
 
         # key_points에는 핵심 인사이트를 담는다 (응답 모델이 list[str] 을 요구한다)
-        key_points = _coerce_str_list(result.get("key_insights"))
+        key_points = _parse_bullets(sections.get("INSIGHTS", ""))
 
-        logger.info("요약 완료 (장르: %s)", genre)
+        logger.info("요약 완료 (장르: %s, 인사이트 %d개)", genre, len(key_points))
         return {"summary": summary, "key_points": key_points}
 
-    except json.JSONDecodeError as e:
-        logger.error("요약 결과 JSON 파싱 실패: %s", e, exc_info=True)
-        raise RuntimeError(f"요약 결과 파싱 실패: {e}") from e
     except Exception as e:
         logger.error("요약 실패: %s", e, exc_info=True)
         raise RuntimeError(f"요약 실패: {e}") from e

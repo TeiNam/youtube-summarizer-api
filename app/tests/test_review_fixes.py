@@ -28,9 +28,9 @@ AUTH_HEADERS = {"X-API-Key": "test-api-key-for-testing"}
 ORIGIN_HEADERS = {"Origin": "https://app.obsidian.md"}
 
 
-def _bedrock_response(payload: dict, **extra) -> dict:
-    """Bedrock invoke_model 응답을 흉내낸다."""
-    body = {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}]}
+def _bedrock_response(text: str, **extra) -> dict:
+    """Bedrock invoke_model 응답을 흉내낸다 (text 는 모델이 낸 원문)."""
+    body = {"content": [{"type": "text", "text": text}]}
     body.update(extra)
     return {"body": io.BytesIO(json.dumps(body).encode("utf-8"))}
 
@@ -108,82 +108,77 @@ class TestCorsPreflightNotBlockedByAuth:
 
 
 class TestMalformedLlmOutputDoesNotBreakTaskLookup:
-    """요약은 성공했는데 조회가 영구 500 이 되던 결함."""
+    """요약은 성공했는데 조회가 영구 500 이 되던 결함.
+
+    원래는 key_insights 가 JSON 객체 배열·null·단일 문자열로 와도 list[str] 로
+    흡수하는지를 봤다. 출력 계약을 구분자 형식으로 바꿔 그 JSON 형태 위반 자체가
+    사라졌으므로(escape 결함으로 응답이 통째로 버려지던 문제도 같이 사라졌다),
+    지켜야 할 것만 남긴다 — **INSIGHTS 를 어떻게 적어 오든 key_points 는
+    list[str]** 이어야 한다. 조회 응답 모델이 그것을 요구한다.
+    """
 
     def setup_method(self) -> None:
         task_manager._tasks.clear()
 
+    @staticmethod
+    def _response(insights_block: str) -> str:
+        return f"===GENRE===\nTECH\n===DETAILED===\n상세\n===INSIGHTS===\n{insights_block}"
+
     @pytest.mark.asyncio
-    async def test_key_insights_as_object_list_is_normalized(self) -> None:
-        """key_insights 가 객체 배열이면 문자열 리스트로 정규화해야 한다."""
-        payload = {
-            "genre": "TECH",
-            "one_line_summary": "한줄",
-            "detailed_summary": "상세",
-            "key_insights": [{"point": "첫째"}, {"insight": "둘째"}],
-            "keywords": [],
-            "further_topics": [],
-        }
+    async def test_numbered_and_multiline_insights_become_str_list(self) -> None:
+        """번호 표식·여러 줄 항목도 문자열 리스트가 되어야 한다."""
+        block = "1) 첫째다.\n   이어지는 문장이다.\n2) 둘째다.\n"
         with patch("app.services.summary_engine._get_bedrock_client") as mock_get:
             mock_client = MagicMock()
-            mock_client.invoke_model.return_value = _bedrock_response(payload)
+            mock_client.invoke_model.return_value = _bedrock_response(
+                self._response(block)
+            )
             mock_get.return_value = mock_client
             result = await summarize_text("텍스트")
 
-        assert result["key_points"] == ["첫째", "둘째"]
+        assert result["key_points"] == ["첫째다. 이어지는 문장이다.", "둘째다."]
         assert all(isinstance(p, str) for p in result["key_points"])
 
     @pytest.mark.asyncio
-    async def test_null_key_insights_becomes_empty_list(self) -> None:
-        """key_insights 가 null 이면 빈 리스트가 되어야 한다."""
-        payload = {
-            "genre": "OTHER",
-            "one_line_summary": "한줄",
-            "detailed_summary": "상세",
-            "key_insights": None,
-            "keywords": None,
-            "further_topics": None,
-        }
+    async def test_insights_without_bullets_become_str_list(self) -> None:
+        """목록 표식을 빼고 문단으로 적어 와도 빈 줄을 경계로 나눠야 한다."""
+        block = "첫째 인사이트다.\n\n둘째 인사이트다.\n"
         with patch("app.services.summary_engine._get_bedrock_client") as mock_get:
             mock_client = MagicMock()
-            mock_client.invoke_model.return_value = _bedrock_response(payload)
+            mock_client.invoke_model.return_value = _bedrock_response(
+                self._response(block)
+            )
+            mock_get.return_value = mock_client
+            result = await summarize_text("텍스트")
+
+        assert result["key_points"] == ["첫째 인사이트다.", "둘째 인사이트다."]
+
+    @pytest.mark.asyncio
+    async def test_year_prefix_is_not_eaten_as_list_marker(self) -> None:
+        """연도로 시작하는 인사이트의 연도를 목록 표식으로 잘라내지 않아야 한다."""
+        block = "- 2026. 하반기에는 공급이 늘어난다.\n"
+        with patch("app.services.summary_engine._get_bedrock_client") as mock_get:
+            mock_client = MagicMock()
+            mock_client.invoke_model.return_value = _bedrock_response(
+                self._response(block)
+            )
+            mock_get.return_value = mock_client
+            result = await summarize_text("텍스트")
+
+        assert result["key_points"] == ["2026. 하반기에는 공급이 늘어난다."]
+
+    @pytest.mark.asyncio
+    async def test_missing_insights_section_becomes_empty_list(self) -> None:
+        """INSIGHTS 섹션이 아예 없으면 빈 리스트여야 한다 (None 이 아니다)."""
+        with patch("app.services.summary_engine._get_bedrock_client") as mock_get:
+            mock_client = MagicMock()
+            mock_client.invoke_model.return_value = _bedrock_response(
+                "===GENRE===\nNEWS\n===DETAILED===\n상세"
+            )
             mock_get.return_value = mock_client
             result = await summarize_text("텍스트")
 
         assert result["key_points"] == []
-
-    @pytest.mark.asyncio
-    async def test_string_key_insights_is_wrapped(self) -> None:
-        """key_insights 가 단일 문자열이면 리스트로 감싸야 한다."""
-        payload = {
-            "genre": "NEWS",
-            "one_line_summary": "한줄",
-            "detailed_summary": "상세",
-            "key_insights": "하나뿐인 인사이트",
-        }
-        with patch("app.services.summary_engine._get_bedrock_client") as mock_get:
-            mock_client = MagicMock()
-            mock_client.invoke_model.return_value = _bedrock_response(payload)
-            mock_get.return_value = mock_client
-            result = await summarize_text("텍스트")
-
-        assert result["key_points"] == ["하나뿐인 인사이트"]
-
-    @pytest.mark.asyncio
-    async def test_non_object_json_is_rejected(self) -> None:
-        """최상위가 JSON 배열이면 요약 실패로 처리해야 한다."""
-        with patch("app.services.summary_engine._get_bedrock_client") as mock_get:
-            mock_client = MagicMock()
-            mock_client.invoke_model.return_value = {
-                "body": io.BytesIO(
-                    json.dumps(
-                        {"content": [{"type": "text", "text": '["배열이다"]'}]}
-                    ).encode("utf-8")
-                )
-            }
-            mock_get.return_value = mock_client
-            with pytest.raises(RuntimeError, match="JSON 객체가 아닙니다"):
-                await summarize_text("텍스트")
 
     def test_completed_task_lookup_returns_200(self) -> None:
         """정규화된 결과는 조회 시 200 이어야 한다 (수정 전에는 500)."""
